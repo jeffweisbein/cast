@@ -1,0 +1,55 @@
+name: Source preview checks
+on:
+  pull_request:
+  push:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cast-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install build and audit tools
+        run: brew install xcodegen gitleaks
+      - name: Scan source
+        run: gitleaks dir . --redact --no-banner
+      - name: Verify generated project
+        run: |
+          GIT_COMMIT_SHA=development Scripts/generate-project.sh
+          git diff --exit-code -- Cast.xcodeproj Support
+          Scripts/generate-project.sh
+      - name: Python regression checks
+        run: sh Scripts/verify-regressions.sh
+      - name: Test macOS
+        run: >-
+          xcodebuild -project Cast.xcodeproj -scheme Cast-macOS
+          -destination 'platform=macOS' -resultBundlePath build/mac-tests.xcresult
+          -derivedDataPath build/DerivedData -onlyUsePackageVersionsFromResolvedFile
+          test CODE_SIGNING_ALLOWED=NO
+      - name: Build macOS Release
+        run: >-
+          xcodebuild -project Cast.xcodeproj -scheme Cast-macOS -configuration Release
+          -destination 'generic/platform=macOS' -derivedDataPath build/DerivedData
+          -onlyUsePackageVersionsFromResolvedFile build CODE_SIGNING_ALLOWED=NO
+      - name: Build iOS Simulator Release
+        run: >-
+          xcodebuild -project Cast.xcodeproj -scheme Cast-iOS -configuration Release
+          -destination 'generic/platform=iOS Simulator' -derivedDataPath build/DerivedData
+          -onlyUsePackageVersionsFromResolvedFile build CODE_SIGNING_ALLOWED=NO
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-tests
+          path: build/mac-tests.xcresult
+          retention-days: 7

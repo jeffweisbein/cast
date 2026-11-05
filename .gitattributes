@@ -1,0 +1,6 @@
+# Internal investigations and mock marketing imagery are not source-release assets.
+docs/diagnostics export-ignore
+docs/status export-ignore
+docs/evidence export-ignore
+docs/images export-ignore
+docs/trademark-landscape.md export-ignore
