@@ -15,7 +15,7 @@ class PackageTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         self.app = Path(tmp.name) / 'Cast.app'
-        self.expected = dict(version='0.4.0', build=8, source='743502253ab8', team='2Q694P9U2Y')
+        self.expected = dict(version='0.4.0', build=8, source='743502253ab8', team='TESTTEAM01')
         self.bundle(self.app, 'Cast', {'CFBundleIdentifier':'com.besttechie.cast',
                     'CFBundleShortVersionString':'0.4.0', 'CFBundleVersion':'8', 'CastGitSHA':'743502253ab8'})
         self.helper = self.app / 'Contents/Resources/Helpers/Hex.app'
@@ -37,7 +37,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(result['hardwareAcceptance'], 'not_checked')
         self.assertEqual(result['notarization'], 'not_checked')
         self.assertEqual(check.call_args_list[1].args[1], gate.HEX_REQUIREMENT)
-        self.assertIn('2Q694P9U2Y', check.call_args_list[2].args[1])
+        self.assertIn('TESTTEAM01', check.call_args_list[2].args[1])
 
     def test_missing_hex_rejected_before_signature_commands(self):
         import shutil

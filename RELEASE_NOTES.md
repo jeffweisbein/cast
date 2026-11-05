@@ -1,3 +1,18 @@
+# Cast 0.4.0 source developer preview
+
+A build-from-source preview for macOS 15+ and iOS 26+, using Xcode 26.3 or newer.
+
+- Native conversations, live progress, approvals and optional secure-entry requests for your own OpenClaw gateways.
+- Search, task details, portable attachments, local drafts and recoverable send state.
+- Optional local Mac dictation through Hex and explicitly scoped window access through Agent Desktop.
+- Apache-2.0 source, pinned dependencies, third-party notices and offline test/build instructions.
+
+This release contains source only: no signed public app, update feed, bundled Hex binary or
+model weights. Live features depend on gateway capabilities and permissions. iPhone signing,
+microphone permissions, real-device acceptance and notarized binary distribution remain
+separate from compiling/testing this source. Existing developer installations are not updated
+by publishing this preview. See README.md, PRIVACY.md and docs/local-dictation-and-desktop.md.
+
 # Unreleased
 
 - **Live transcript following:** Keep incoming and streaming replies visible while following Latest, including updates that do not grow the scroll content. On Mac, only actual transcript input pauses following; queued follow work rechecks reading intent before scrolling.
