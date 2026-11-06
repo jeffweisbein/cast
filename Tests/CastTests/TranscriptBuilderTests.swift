@@ -215,7 +215,7 @@ final class TranscriptBuilderTests: XCTestCase {
         var messages: [ChatMessage] = []
         for index in 0 ..< 600 {
             // Deterministic mix: user turns, answers, tool runs, and day rollovers.
-            let timestamp = base + Double(index) * 90_000
+            let timestamp = base + Double(index) * 300_000
             switch index % 5 {
             case 0:
                 messages.append(Self.text("ask \(index)", role: "user", id: "u-\(index)", ts: timestamp))
@@ -231,7 +231,7 @@ final class TranscriptBuilderTests: XCTestCase {
                 messages.append(Self.text("answer \(index)", id: "a-\(index)", ts: timestamp))
             }
         }
-        // 90 s steps over 600 rows cross several day boundaries and many grouping gaps.
+        // Five-minute steps span almost 50 hours, crossing day boundaries in every timezone.
         let expected = TranscriptBuilder.items(from: messages)
         XCTAssertGreaterThan(
             expected.filter { if case .daySeparator = $0 { return true } else { return false } }.count,
