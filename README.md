@@ -15,21 +15,25 @@ living in a browser tab or terminal.
 
 ## Downloads
 
-**[Download the source preview](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/Cast-v0.4.0-preview.2-source.zip)** ·
-[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.2) ·
-[SHA-256 checksums](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/SHA256SUMS)
+**[Download Cast for Mac](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/Cast-0.4.0-preview.3-macOS-arm64.zip)** ·
+[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.3) ·
+[SHA-256 checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/SHA256SUMS-preview3.txt)
 
 | Platform | Available now |
 | --- | --- |
-| **Mac — macOS 15+** | [Build from source](#build-from-source). A signed, notarized app download is not available yet. |
+| **Mac — Apple Silicon, macOS 15+** | Signed and Apple-notarized **0.4.0 (11)** developer preview. Download the ZIP above, unzip, then move Cast.app to Applications. |
 | **iPhone / iPad — iOS 26+** | [Build and sign with Xcode](CONTRIBUTING.md). No public TestFlight or App Store download yet. |
 
-The ZIP contains **source code, not an installable app**. Building requires Xcode 26.3 or newer
-and XcodeGen. Cast also needs a running OpenClaw gateway you control; it does not include
-hosted AI access or a gateway. See [Requirements](#requirements) and [all releases](https://github.com/jeffweisbein/cast/releases).
+Cast needs a running OpenClaw gateway you control; it does not include hosted AI access
+or a gateway. See [Requirements](#requirements).
 
-> **Developer preview:** Expect rough edges and gateway-version differences. Public app
-> downloads will be linked here once the signed releases are ready.
+Prefer to build it yourself? [Download the source preview](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/Cast-v0.4.0-preview.2-source.zip)
+([source checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/SHA256SUMS))
+or browse [all releases](https://github.com/jeffweisbein/cast/releases). The source ZIP is not
+an installable app; building requires Xcode 26.3 or newer and XcodeGen.
+
+> **Developer preview:** Expect rough edges and gateway-version differences. Automatic app
+> updates are not configured yet; download new releases manually.
 
 ## What Cast does
 
