@@ -60,9 +60,18 @@ class PackageTests(unittest.TestCase):
 
     def test_wrong_hex_vendor_rejected_even_if_outer_signature_passes(self):
         def check(path, requirement=None):
-            if path == self.helper: raise RuntimeError('Wrong helper team')
+            if path.resolve() == self.helper.resolve():
+                self.assertEqual(requirement, gate.HEX_REQUIREMENT)
+                raise RuntimeError('Wrong helper team')
         with patch.object(gate, 'check_signature', side_effect=check), self.assertRaises(gate.PackageRejected):
             gate.verify_package(self.app, **self.expected)
+
+    def test_wrong_hex_vendor_rejected_through_aliased_temp_directory(self):
+        alias = self.app.parent / 'alias'
+        alias.symlink_to(self.app.parent, target_is_directory=True)
+        self.app = alias / 'Cast.app'
+        self.helper = self.app / 'Contents/Resources/Helpers/Hex.app'
+        self.test_wrong_hex_vendor_rejected_even_if_outer_signature_passes()
 
     def test_executable_cannot_escape_bundle(self):
         binary=self.helper / 'Contents/MacOS/hex';binary.unlink()
