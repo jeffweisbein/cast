@@ -1,35 +1,35 @@
 # Cast
 
-### Latest workflow improvements
-
-**Search** in the sidebar (Cmd-K on Mac) finds saved messages, files, and work in the current
-workspace. Enable gateway history to include uncached history from listed conversations and
-recent task records. **Tasks** opens real task details and capability-gated controls.
-**Deliverables → Refresh gateway attachments** discovers generated attachments; download,
-preview, Save as, and share them on either device. See [Continuity guide](docs/continuity.md).
-
-
-Click the model below the composer to choose a model/reasoning effort for that conversation.
-Use **Needs you** for approvals, explicit blockers, failures, and results awaiting review;
-**Deliverables** keeps shared report, ZIP, PR, and release references across restarts.
-**Status & updates** explains gateway compatibility and shows the installed version,
-last-reported conversation context, history recovery, unconfirmed sends, and recent failures.
-See [Session diagnostics](docs/session-diagnostics.md) for what these observations mean.
-
-For signed Mac installation, Mac ZIP releases, Sparkle updates, and TestFlight,
-see [Release guide](docs/releases.md). Unconfigured update feeds remain disabled.
-
 <p align="center">
   <img src="Sources/Assets.xcassets/AppIcon.appiconset/icon-mac-256.png" width="112" alt="Cast app icon">
 </p>
 
 <p align="center"><strong>A native command center for OpenClaw on iPhone and Mac.</strong></p>
 
+Cast brings conversations from your OpenClaw gateways into one focused Apple-platform app.
+Follow live agent work, search conversations, review approvals, and find shared files without
+living in a browser tab or terminal.
 
+![Cast on macOS, showing the conversation sidebar, a launch-checklist chat, and the message composer](docs/images/cast-macos.png)
+*The real Mac interface with fictional demo conversations. No live workspace or customer data is shown.*
 
-Cast brings conversations from user-operated OpenClaw gateways into one focused Apple-platform app. Switch between workspaces, follow live agent work, search transcripts, share files and links, and keep up with unread replies without living in a browser tab or terminal.
+## Downloads
 
-> **Developer preview:** Build from source with Xcode. Official public app downloads and App Store distribution are not part of this preview. Expect rough edges and gateway-version differences.
+**[Download the source preview](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/Cast-v0.4.0-preview.2-source.zip)** ·
+[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.2) ·
+[SHA-256 checksums](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/SHA256SUMS)
+
+| Platform | Available now |
+| --- | --- |
+| **Mac — macOS 15+** | [Build from source](#build-from-source). A signed, notarized app download is not available yet. |
+| **iPhone / iPad — iOS 26+** | [Build and sign with Xcode](CONTRIBUTING.md). No public TestFlight or App Store download yet. |
+
+The ZIP contains **source code, not an installable app**. Building requires Xcode 26.3 or newer
+and XcodeGen. Cast also needs a running OpenClaw gateway you control; it does not include
+hosted AI access or a gateway. See [Requirements](#requirements) and [all releases](https://github.com/jeffweisbein/cast/releases).
+
+> **Developer preview:** Expect rough edges and gateway-version differences. Public app
+> downloads will be linked here once the signed releases are ready.
 
 ## What Cast does
 
@@ -40,6 +40,19 @@ Cast brings conversations from user-operated OpenClaw gateways into one focused 
 - Searches conversations and keeps local media/link libraries
 - Accepts text, URLs, images, and files through the iOS Share Extension
 - Stores credentials and device identity in Apple Keychain
+
+## Find your work
+
+- **Search** in the sidebar (Cmd-K on Mac) finds saved messages, files, and work in the current workspace. Enable gateway history to include uncached history from listed conversations and recent task records.
+- **Tasks** opens task details and the controls your gateway supports.
+- **Needs you** collects approvals, blockers, failures, and results awaiting review.
+- **Deliverables** keeps report, ZIP, PR, and release references across restarts. Refresh gateway attachments to discover, download, preview, save, or share generated files.
+- **Status & updates** shows gateway compatibility, the installed version, conversation recovery, unconfirmed sends, and recent failures.
+
+Click the model below the composer to choose a model and reasoning effort for that conversation.
+See the [Continuity guide](docs/continuity.md) and [Session diagnostics](docs/session-diagnostics.md).
+For signed builds, packaging, updates, and TestFlight, see the [Release guide](docs/releases.md).
+Unconfigured update feeds remain disabled.
 
 ## Keep the sidebar focused
 
