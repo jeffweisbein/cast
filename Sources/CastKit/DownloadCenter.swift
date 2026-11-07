@@ -28,9 +28,10 @@ public final class DownloadCenter {
     public static func key(_ item: Deliverable) -> String {
         // Length prefixes make the full revision identity collision-free without per-frame
         // JSON encoders, cryptographic hashing or delimiter ambiguities.
-        [item.id, item.sessionKey, item.messageID, item.target, item.title,
-         item.artifactID ?? "", item.mimeType ?? "", item.downloadMode ?? "", item.sizeBytes.map(String.init) ?? ""]
-            .map { "\($0.utf8.count):\($0)" }.joined()
+        let size = item.sizeBytes.map { String($0) } ?? ""
+        let fields: [String] = [item.id, item.sessionKey, item.messageID, item.target, item.title,
+            item.artifactID ?? "", item.mimeType ?? "", item.downloadMode ?? "", size]
+        return fields.map { "\($0.utf8.count):\($0)" }.joined()
     }
     public struct Row: Identifiable {
         public let id: String
