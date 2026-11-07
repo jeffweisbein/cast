@@ -14,7 +14,7 @@ struct PendingEcho: Sendable {
 /// because prepared attachment payloads (up to ~24 MB of base64 source bytes) are far too
 /// heavy to persist per cached message; the row's echo text and placeholders cannot stand
 /// in for them.
-struct PendingSendContext: Sendable, Codable {
+struct PendingSendContext: Sendable, Codable, Equatable {
     let text: String
     let attachments: [PreparedAttachment]
     let deliver: Bool
@@ -435,7 +435,15 @@ public final class ChatStore {
     /// `errorKind:"context_length"`. Paired with the alert in `lastError`; cleared with it.
     public private(set) var contextCompactionOfferKey: String?
     public private(set) var isAbortingRun = false
-    public var pendingAttachments: [PreparedAttachment] = []
+    private var attachmentDrafts: [String: [PreparedAttachment]] = [:]
+    private var unselectedAttachments: [PreparedAttachment] = []
+    public var pendingAttachments: [PreparedAttachment] {
+        get { selectedSessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments }
+        set {
+            if let key = selectedSessionKey { attachmentDrafts[key] = newValue.isEmpty ? nil : newValue }
+            else { unselectedAttachments = newValue }
+        }
+    }
     public var deliverExternally = false
 
     @ObservationIgnored private var searchQueryStorage = ""
@@ -493,7 +501,7 @@ public final class ChatStore {
         let watermark: Int64?
     }
     @ObservationIgnored
-    private var sessionsRequestInFlight = false
+    private var sessionsRequestGeneration: Int?
     /// Sessions whose `sessions.messages.subscribe` the gateway actually acknowledged.
     @ObservationIgnored
     private var subscribedSessionKeys: Set<String> = []
@@ -948,6 +956,9 @@ public final class ChatStore {
         self.questionExpiryTask?.cancel()
         self.questionInbox = QuestionInbox()
         self.questionError = nil
+        if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
+            attachmentDrafts.removeAll(); unselectedAttachments = []
+        }
         self.profile = profile
         self.restartWithStoredCredential()
     }
@@ -1186,10 +1197,12 @@ public final class ChatStore {
         guard self.supportsModelControls else { throw ModelControlError.unsupported }
         guard let client, case .connected = self.connectionState else { throw ModelControlError.disconnected }
         let agentID = SessionKeyMatcher.agentID(from: key) ?? "main"
+        let generation = clientGeneration
         let data = try await client.request(method: "models.list", params: [
             "agentId": agentID, "includeProviderCapabilities": true,
         ])
-        guard (SessionKeyMatcher.agentID(from: self.selectedSessionKey) ?? "main") == agentID else { return }
+        guard !Task.isCancelled, generation == clientGeneration,
+              (SessionKeyMatcher.agentID(from: self.selectedSessionKey) ?? "main") == agentID else { return }
         self.modelCatalog = try self.decoder.decode(GatewayModelsResponse.self, from: data).models
         self.modelCatalogAgentID = agentID
     }
@@ -1204,9 +1217,13 @@ public final class ChatStore {
         let row = self.sessions.first { $0.key == key }
         let params = try SessionModelMutation.params(key: key, sessionID: row?.modelInfo?.sessionId,
                                                      model: model, effort: effort)
+        let generation = clientGeneration
         self.savingModelKeys.insert(key)
         defer { self.savingModelKeys.remove(key) }
         _ = try await client.request(method: "sessions.patch", params: params.mapValues(\.value))
+        guard generation == clientGeneration else {
+            throw ModelControlError.reasoningNotApplied("Connection changed; check the original conversation before retrying.")
+        }
         self.pendingModelChanges[key] = model.reference
         // sessions.patch admin-scopes thinkingLevel, which paired-device tokens lack. The
         // `/think` command persists the same override through chat.send (operator.write); the
@@ -1221,25 +1238,30 @@ public final class ChatStore {
                     deliver: false,
                     attachments: [])
             } catch {
-                await self.refreshSessions()
+                if generation == clientGeneration { await self.refreshSessions() }
                 throw ModelControlError.reasoningNotApplied(error.localizedDescription)
             }
         }
+        guard generation == clientGeneration else { throw ModelControlError.disconnected }
         await self.refreshSessions()
     }
 
     public func refreshSessions() async {
-        guard let client = self.client, !self.sessionsRequestInFlight else { return }
-        self.sessionsRequestInFlight = true
-        defer { self.sessionsRequestInFlight = false }
+        guard let client = self.client else { return }
+        await refreshSessions { try await client.request(method: "sessions.list", params: [
+            "includeGlobal": true, "includeUnknown": false, "limit": 60,
+            "includeDerivedTitles": true, "includeLastMessage": true,
+        ]) }
+    }
+
+    func refreshSessions(request: () async throws -> Data) async {
+        let generation = clientGeneration
+        guard sessionsRequestGeneration != generation else { return }
+        sessionsRequestGeneration = generation
+        defer { if sessionsRequestGeneration == generation { sessionsRequestGeneration = nil } }
         do {
-            let data = try await client.request(method: "sessions.list", params: [
-                "includeGlobal": true,
-                "includeUnknown": false,
-                "limit": 60,
-                "includeDerivedTitles": true,
-                "includeLastMessage": true,
-            ])
+            let data = try await request()
+            guard !Task.isCancelled, generation == clientGeneration else { return }
             let list = try self.decoder.decode(SessionsListResponse.self, from: data)
             if let mainKey = list.defaults?.mainSessionKey { self.mainSessionKey = mainKey }
             let refreshed = Self.dedupedByID(
@@ -1271,6 +1293,7 @@ public final class ChatStore {
             }
             #endif
         } catch {
+            guard !Task.isCancelled, generation == clientGeneration else { return }
             // Session discovery is background synchronization. Keep the last
             // usable list and surface a quiet retry affordance instead of an
             // app-blocking alert during launch/reconnect.
@@ -2253,26 +2276,44 @@ public final class ChatStore {
         }
     }
 
+    struct AttachmentDraftTarget: Equatable, Sendable {
+        let workspaceID: String
+        let gatewayURL: URL
+        let sessionKey: String?
+    }
+    var attachmentDraftTarget: AttachmentDraftTarget {
+        AttachmentDraftTarget(workspaceID: profile.id, gatewayURL: profile.gatewayURL, sessionKey: selectedSessionKey)
+    }
+    func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) {
+        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else { return }
+        switch result {
+        case let .success(attachment):
+            if let key = target.sessionKey { attachmentDrafts[key, default: []].append(attachment) }
+            else if selectedSessionKey == nil { unselectedAttachments.append(attachment) }
+        case let .failure(error):
+            if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }
+        }
+    }
     public func addAttachment(url: URL) {
-        Task.detached {
-            do {
-                let attachment = try AttachmentProcessor.prepare(url: url)
-                await MainActor.run { self.pendingAttachments.append(attachment) }
-            } catch {
-                await MainActor.run { self.lastError = error.localizedDescription }
-            }
+        addAttachment(url: url, target: attachmentDraftTarget)
+    }
+    func addAttachment(url: URL, target: AttachmentDraftTarget) {
+        Task {
+            let result = await Task.detached { try AttachmentProcessor.prepare(url: url) }.result
+            finishAttachmentPreparation(result, target: target)
         }
     }
 
-    /// Raw image bytes (pasteboard, drag-and-drop) through the same downsampling pipeline.
+    /// Raw image bytes use the same origin-bound preparation as files.
     public func addAttachment(imageData: Data, fileName: String) {
-        Task.detached {
-            do {
-                let attachment = try AttachmentProcessor.prepareImage(data: imageData, fileName: fileName)
-                await MainActor.run { self.pendingAttachments.append(attachment) }
-            } catch {
-                await MainActor.run { self.lastError = error.localizedDescription }
-            }
+        addAttachment(imageData: imageData, fileName: fileName, target: attachmentDraftTarget)
+    }
+    func addAttachment(imageData: Data, fileName: String, target: AttachmentDraftTarget) {
+        Task {
+            let result = await Task.detached {
+                try AttachmentProcessor.prepareImage(data: imageData, fileName: fileName)
+            }.result
+            finishAttachmentPreparation(result, target: target)
         }
     }
 
@@ -2500,7 +2541,7 @@ public final class ChatStore {
             let url = MediaThumbnailLoader.resolvedFileURL(for: item.target)
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                   values.isRegularFile == true, let size = values.fileSize,
-                  (try? ArtifactTransferPolicy.validateSize(size, expected: item.sizeBytes)) != nil,
+                  (item.sizeBytes == nil || item.sizeBytes == size),
                   FileManager.default.isReadableFile(atPath: url.path) else { return nil }
             return url
         }.value
@@ -2681,11 +2722,15 @@ public final class ChatStore {
         let method = approval.kind == .plugin
             ? "plugin.approval.resolve"
             : "exec.approval.resolve"
+        let generation = clientGeneration
         Task {
             do {
                 _ = try await client.request(method: method, params: ["id": id, "decision": decision])
+                guard generation == clientGeneration else { return }
+                approvalRevision &+= 1
                 self.approvals.removeAll { $0.id == id }
             } catch {
+                guard generation == clientGeneration else { return }
                 self.lastError = "Approval: \(error.localizedDescription)"
             }
         }
@@ -2693,23 +2738,28 @@ public final class ChatStore {
 
     public func refreshApprovals() async {
         guard let client = self.client else { return }
-        // Replay both families; each list is `[{id, request, createdAtMs, expiresAtMs}]`.
-        // Requiring one success preserves the old behavior of keeping the last known
-        // prompts when the gateway cannot answer at all.
-        var replayed: [ExecApproval] = []
+        await refreshApprovals { method in try await client.request(method: method, params: [:]) }
+    }
+
+    // Injectable transport for partial-failure and in-flight event regression tests.
+    func refreshApprovals(request: (String) async throws -> Data) async {
+        let generation = clientGeneration
+        let revision = approvalRevision
+        var replayed = approvals
         var anyListSucceeded = false
         for (method, kind) in [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)] {
-            guard let data = try? await client.request(method: method, params: [:]) else { continue }
+            guard !Task.isCancelled, generation == clientGeneration, revision == approvalRevision else { return }
+            guard let data = try? await request(method),
+                  let decoded = try? decoder.decode([ExecApproval].self, from: data) else { continue }
             anyListSucceeded = true
-            let decoded = (try? self.decoder.decode([ExecApproval].self, from: data)) ?? []
+            replayed.removeAll { $0.kind == kind }
             replayed.append(contentsOf: decoded.map { approval in
-                var tagged = approval
-                tagged.kind = kind
-                return tagged
+                var tagged = approval; tagged.kind = kind; return tagged
             })
         }
-        guard anyListSucceeded else { return }
-        self.approvals = Self.dedupedByID(replayed.filter { !$0.isExpired })
+        guard anyListSucceeded, !Task.isCancelled, generation == clientGeneration, revision == approvalRevision else { return }
+        approvalRevision &+= 1
+        approvals = Self.dedupedByID(replayed.filter { !$0.isExpired })
     }
 
     private func scheduleSearch() {
@@ -2782,7 +2832,7 @@ public final class ChatStore {
         case "exec.approval.resolved", "plugin.approval.resolved":
             // Same removal for both families: another operator surface decided, so the
             // card must leave every Cast screen regardless of which kind it was.
-            if let id = event.payload?["id"]?.stringValue { self.approvals.removeAll { $0.id == id } }
+            if let id = event.payload?["id"]?.stringValue { approvalRevision &+= 1; self.approvals.removeAll { $0.id == id } }
         case "cron":
             self.handleCronEvent(event)
         case "task":
@@ -3207,9 +3257,12 @@ public final class ChatStore {
         }
     }
 
+    @ObservationIgnored private var approvalRevision = 0
+
     private func handleApprovalRequested(_ event: EventFrame, kind: ApprovalKind) {
         guard var approval = self.decodePayload(event, as: ExecApproval.self), !approval.isExpired else { return }
         approval.kind = kind
+        approvalRevision &+= 1
         self.approvals.removeAll { $0.id == approval.id }
         self.approvals.append(approval)
     }
@@ -3469,9 +3522,10 @@ public final class ChatStore {
 
     private func fetchProgressCard(for sessionKey: String) async {
         guard let client = self.client else { return }
+        let generation = clientGeneration
         do {
             let card = try await client.getProgressCard(sessionKey: sessionKey)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == clientGeneration else { return }
             if let card {
                 self.progressCards[sessionKey] = card
             } else {

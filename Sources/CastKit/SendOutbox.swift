@@ -17,6 +17,11 @@ actor SendOutbox {
         return root.appendingPathComponent(digest + ".json")
     }
     func save(_ send: StoredSend) throws {
+        if FileManager.default.fileExists(atPath: url(send.idempotencyKey).path) {
+            let original = try load(send.idempotencyKey, sessionKey: send.sessionKey)
+            guard original.context == send.context else { throw ArtifactTransferError.invalid }
+            return // Exact retry: retain the original bytes and creation time.
+        }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let encoded = try JSONEncoder().encode(send)
         let existing = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])) ?? []

@@ -15,15 +15,16 @@ public struct GatewayArtifact: Codable, Sendable, Identifiable {
     public let download: Download
 }
 
-public enum ArtifactTransferError: Error, LocalizedError {
-    case invalid, tooLarge, unavailable, changed, connectionChanged
+public enum ArtifactTransferError: Error, LocalizedError, Equatable {
+    case invalid, tooLarge, unavailable, changed, connectionChanged, notAttached
     public var errorDescription: String? {
         switch self {
         case .invalid: return "The gateway returned an invalid download. No file was saved."
         case .tooLarge: return "This file exceeds Cast’s 64 MB download limit."
         case .unavailable: return "The file is unavailable or its link expired. Retry to request a fresh link."
-        case .changed: return "The downloaded size does not match the artifact. Retry to fetch it again."
+        case .changed: return "The file size changed or the download is incomplete. Refresh the attachment list before trying again."
         case .connectionChanged: return "The connection changed during this download. Retry on the current connection."
+        case .notAttached: return "This file link does not provide a complete downloadable file. Ask the agent to attach the file to this conversation."
         }
     }
 }
@@ -33,7 +34,7 @@ public enum ArtifactTransferPolicy {
     public static func safeFilename(_ title: String) -> String {
         let name = (title.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
             .components(separatedBy: .controlCharacters).joined()
-        guard !name.isEmpty, name != ".", name != ".." else { return "download" }
+        guard !name.isEmpty, name != ".", name != "..", name != "/" else { return "download" }
         // Bound bytes, not Swift characters; leave room for an inferred extension.
         let ext = (name as NSString).pathExtension
         let suffix = !ext.isEmpty && ext.utf8.count <= 32 ? "." + ext : ""
@@ -75,10 +76,10 @@ public enum ArtifactTransferPolicy {
         return current ?? listedSize
     }
     public static func fileBytes(_ response: AnyCodable) throws -> Data {
-        guard let file = response["file"], file["missing"]?.boolValue != true,
-              file["truncated"]?.boolValue != true, response["truncated"]?.boolValue != true,
+        guard let file = response["file"], file["missing"]?.boolValue != true else { throw ArtifactTransferError.unavailable }
+        guard file["truncated"]?.boolValue != true, response["truncated"]?.boolValue != true,
               file["previewKind"]?.stringValue != "unsupported",
-              let content = file["content"]?.stringValue else { throw ArtifactTransferError.unavailable }
+              let content = file["content"]?.stringValue else { throw ArtifactTransferError.notAttached }
         let encoding = file["contentEncoding"]?.stringValue ?? "utf8"
         // Bound before allocating the decoded copy, then validate actual byte count.
         guard content.utf8.count <= ((maximumBytes + 2) / 3) * 4 else { throw ArtifactTransferError.tooLarge }
@@ -116,6 +117,8 @@ public enum ArtifactDownloader {
             let (stream, response) = try await session.bytes(from: url)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw ArtifactTransferError.unavailable }
             let length = response.expectedContentLength >= 0 ? Int(response.expectedContentLength) : nil
+            let encoding = http.value(forHTTPHeaderField: "Content-Encoding")?.lowercased()
+            let decodedLength = encoding == nil || encoding == "identity" ? length : nil
             if let length, length > ArtifactTransferPolicy.maximumBytes { throw ArtifactTransferError.tooLarge }
             var data = Data()
             for try await byte in stream {
@@ -123,24 +126,21 @@ public enum ArtifactDownloader {
                 guard data.count <= ArtifactTransferPolicy.maximumBytes else { throw ArtifactTransferError.tooLarge }
                 if data.count % 65536 == 0 {
                     try Task.checkCancellation()
-                    await progress(data.count, expectedSize ?? length)
+                    await progress(data.count, expectedSize ?? decodedLength)
                 }
             }
             try Task.checkCancellation()
             try ArtifactTransferPolicy.validateSize(data.count, expected: expectedSize)
             // URLSession delivers decoded bytes. A compressed Content-Length describes
             // the wire body, not these bytes, and must not be compared with them.
-            let encoding = http.value(forHTTPHeaderField: "Content-Encoding")?.lowercased()
-            if encoding == nil || encoding == "identity" {
-                try ArtifactTransferPolicy.validateSize(data.count, expected: length)
-            }
+            try ArtifactTransferPolicy.validateSize(data.count, expected: decodedLength)
             await progress(data.count, data.count)
             try Task.checkCancellation()
             return data
         } catch is CancellationError { throw CancellationError() }
         catch let error as ArtifactTransferError { throw error }
         catch {
-            if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+            if Task.isCancelled { throw CancellationError() }
             throw ArtifactTransferError.unavailable
         }
     }

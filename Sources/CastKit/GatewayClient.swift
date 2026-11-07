@@ -83,7 +83,11 @@ public actor GatewayClient {
     private var usedDeviceFallback = false
     private var connectedDeviceID: String?
     private let decoder = JSONDecoder()
-    private let encoder = JSONEncoder()
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return encoder
+    }()
 
     // Setup-code bootstrap fails closed on any scope outside the gateway's
     // handoff profile (operator.read/write/approvals + talk.secrets), so

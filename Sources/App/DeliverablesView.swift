@@ -42,6 +42,7 @@ struct DeliverablesView: View {
                         self.store.selectedSessionKey = item.sessionKey
                         self.dismiss()
                     }
+                    .id("\(item.reviewID):\(item.sizeBytes ?? -1):\(item.title):\(item.mimeType ?? "")") // Revisions/metadata changes cannot reuse an old row's download state.
                 }
             }
             .task { await sync() }
@@ -62,7 +63,9 @@ struct DeliverablesView: View {
         var failures = 0
         for key in keys {
             if Task.isCancelled { return }
-            do { try await store.refreshArtifacts(sessionKey: key) } catch { failures += 1 }
+            do { try await store.refreshArtifacts(sessionKey: key) }
+            catch is CancellationError { return }
+            catch { failures += 1 }
         }
         syncError = failures == 0 ? nil : "Some attachments could not be refreshed. Check the connection and try again."
     }
@@ -104,7 +107,9 @@ private struct DeliverableRow: View {
             if let error = self.error { Text(error).font(.caption).foregroundStyle(.red) }
         }
         .padding(.vertical, 6)
-        .task(id: self.item.reviewID) { self.cachedURL = await self.store.localDeliverableURL(self.item) }
+        .task(id: self.item.reviewID) {
+            if let url = await self.store.localDeliverableURL(self.item), !Task.isCancelled { self.cachedURL = url }
+        }
         .quickLookPreview(self.$previewURL)
         .onDisappear { downloadTask?.cancel() }
         .fileExporter(isPresented: $exporting, document: cachedURL.map { DownloadExport(url: $0) },

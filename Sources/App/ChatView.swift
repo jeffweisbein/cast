@@ -803,6 +803,7 @@ struct Composer: View, Equatable {
     private let storeIdentity: ObjectIdentifier
     @State private var draft = ""
     @State private var importing = false
+    @State private var importTarget: ChatStore.AttachmentDraftTarget?
     @State private var confirmingDelivery = false
     @State private var dropTargeted = false
     @StateObject private var voiceRecorder = VoiceRecorderController()
@@ -974,8 +975,11 @@ struct Composer: View, Equatable {
             allowedContentTypes: [.image, .pdf, .plainText, .data],
             allowsMultipleSelection: true)
         { result in
-            if case let .success(urls) = result { for url in urls { self.store.addAttachment(url: url) } }
-            else if case let .failure(error) = result { self.store.clearError(); _ = error }
+            let target = self.importTarget
+            self.importTarget = nil
+            if case let .success(urls) = result, let target {
+                for url in urls { self.store.addAttachment(url: url, target: target) }
+            } else if case let .failure(error) = result { self.store.showError(error.localizedDescription) }
         }
         .confirmationDialog(
             "Deliver this reply through the session's external channel?",
@@ -1113,7 +1117,7 @@ struct Composer: View, Equatable {
                 self.showingPhotos = true
             }
             Button("Files", systemImage: "folder") {
-                self.importing = true
+                self.importTarget = self.store.attachmentDraftTarget; self.importing = true
             }
         } label: {
             Image(systemName: "paperclip")
@@ -1126,7 +1130,7 @@ struct Composer: View, Equatable {
         .padding(.vertical, 4)
         .accessibilityLabel("Attach photo or file")
         #else
-        Button { self.importing = true } label: {
+        Button { self.importTarget = self.store.attachmentDraftTarget; self.importing = true } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -1377,19 +1381,20 @@ struct Composer: View, Equatable {
     #endif
 
     private func importDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        let target = self.store.attachmentDraftTarget
         var handled = false
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 handled = true
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
                     guard let url else { return }
-                    Task { @MainActor in self.store.addAttachment(url: url) }
+                    Task { @MainActor in self.store.addAttachment(url: url, target: target) }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 handled = true
                 provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                     guard let data else { return }
-                    Task { @MainActor in self.store.addAttachment(imageData: data, fileName: "Dropped Image") }
+                    Task { @MainActor in self.store.addAttachment(imageData: data, fileName: "Dropped Image", target: target) }
                 }
             }
         }

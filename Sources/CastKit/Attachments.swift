@@ -91,11 +91,27 @@ public enum AttachmentProcessor {
     }
 
     public static func validateFrame(message: String, attachments: [PreparedAttachment]) throws {
-        // Match the gateway client's JSONEncoder, including quotes, control characters,
-        // filenames and escaped base64 slashes. Leave 1 MB for request metadata.
-        let payload = AnyCodable(["message": message, "attachments": attachments.map(\.rpcValue)] as [String: Any?])
-        let encodedSize = try JSONEncoder().encode(payload).count
+        let encodedSize = try frameByteCount(message: message, attachments: attachments)
         guard encodedSize <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(encodedSize) }
+    }
+
+    // Count the exact JSON payload without constructing base64 on the UI actor.
+    // The gateway encoder uses withoutEscapingSlashes, so base64 has no JSON escapes.
+    static func frameByteCount(message: String, attachments: [PreparedAttachment]) throws -> Int {
+        let metadata: [[String: String]] = attachments.map {
+            ["type": $0.type, "mimeType": $0.mimeType, "fileName": $0.fileName, "content": ""]
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
+        let envelope = AnyCodable(["message": "", "attachments": metadata] as [String: Any?])
+        var size = try encoder.encode(envelope).count
+        for byte in message.utf8 {
+            switch byte {
+            case 8, 9, 10, 12, 13, 34, 92: size += 2
+            case 0..<32: size += 6
+            default: size += 1
+            }
+        }
+        return size + attachments.reduce(0) { $0 + (($1.data.count + 2) / 3) * 4 }
     }
 
     static func compressImage(_ input: Data, targetBytes: Int = inlineImageTargetBytes) throws -> Data {

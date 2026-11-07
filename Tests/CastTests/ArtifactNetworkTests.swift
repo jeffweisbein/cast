@@ -14,9 +14,9 @@ private final class ArtifactTestProtocol: URLProtocol, @unchecked Sendable {
         let path = request.url!.path
         let status = path == "/expired" ? 401 : path == "/redirect" ? 302 : 200
         let body = path == "/large" ? Data(repeating: 65, count: 131072) : Data([0x50,0x4b,0x03,0x04,0,255,1,2])
-        let length = path == "/oversized" ? ArtifactTransferPolicy.maximumBytes + 1 : path == "/short-body" ? body.count + 4 : body.count
+        let length = path == "/oversized" ? ArtifactTransferPolicy.maximumBytes + 1 : path == "/short-body" ? body.count + 4 : path == "/compressed" ? 4 : body.count
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Length": "\(length)", "Content-Type": "application/zip", "Location": "https://elsewhere.test/file"])!
+            headerFields: ["Content-Length": "\(length)", "Content-Encoding": path == "/compressed" ? "gzip" : "identity", "Content-Type": "application/zip", "Location": "https://elsewhere.test/file"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -45,7 +45,9 @@ final class ArtifactNetworkTests: XCTestCase {
                 _ = try await ArtifactDownloader.download(url: URL(string: "https://fixture.test/\(path)")!,
                     expectedSize: path == "mismatch" ? 10 : nil, configuration: config(), progress: { _, _ in })
                 XCTFail("Accepted \(path)")
-            } catch {}
+            } catch let error as ArtifactTransferError {
+                XCTAssertEqual(error, path == "oversized" ? .tooLarge : ["mismatch", "short-body"].contains(path) ? .changed : .unavailable)
+            } catch { XCTFail("Unexpected error for \(path): \(error)") }
         }
     }
     func testCancelledTransferCannotReturnAFile() async {
@@ -56,7 +58,9 @@ final class ArtifactNetworkTests: XCTestCase {
                     withUnsafeCurrentTask { $0?.cancel() }
                 })
         }
-        do { _ = try await task.value; XCTFail("Cancelled transfer succeeded") } catch {}
+        do { _ = try await task.value; XCTFail("Cancelled transfer succeeded") }
+        catch is CancellationError { }
+        catch { XCTFail("Expected cancellation, got \(error)") }
     }
 
     func testUnicodeDownloadNameFitsFilesystemAndPreservesExtension() throws {
@@ -125,6 +129,46 @@ final class ArtifactNetworkTests: XCTestCase {
         let small = PreparedAttachment(type: "file", mimeType: "application/octet-stream", fileName: "file.bin", data: Data([0, 255]))
         XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "A file", attachments: [small]))
         let large = PreparedAttachment(type: "file", mimeType: "application/octet-stream", fileName: "file.bin", data: Data(repeating: 255, count: 10 * 1024 * 1024))
-        XCTAssertThrowsError(try AttachmentProcessor.validateFrame(message: "", attachments: [large]))
+        // Base64 slash escaping is deliberately disabled on the actual wire encoder.
+        XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "", attachments: [large]))
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
+        let message = "quote\" slash/ backslash\\ control\u{0001}\n🦊\u{2028}"
+        let payload = AnyCodable(["message": message, "attachments": [small.rpcValue]] as [String: Any?])
+        XCTAssertEqual(try AttachmentProcessor.frameByteCount(message: message, attachments: [small]), try encoder.encode(payload).count)
+    }
+
+    func testDecodedCompressedBodyDoesNotUseWireLength() async throws {
+        let bytes = try await ArtifactDownloader.download(url: URL(string: "https://fixture.test/compressed")!, expectedSize: 8, configuration: config(), progress: { _, _ in })
+        XCTAssertEqual(bytes.count, 8)
+    }
+
+    func testLoadedAttachmentStateSurvivesReappearanceButNotRevision() {
+        let attachment = ManagedChatAttachment(artifactId: "a", label: "file", mimeType: nil, sizeBytes: 8)
+        let id = ManagedAttachmentLoadState.ID(attachment: attachment, attempt: 0)
+        var state = ManagedAttachmentLoadState()
+        state.begin(id)
+        let url = URL(fileURLWithPath: "/tmp/file")
+        state.localURL = url
+        state.begin(id) // A lazy row reappearing with the same task identity.
+        XCTAssertEqual(state.localURL, url)
+        state.begin(.init(attachment: attachment, attempt: 1))
+        XCTAssertNil(state.localURL)
+    }
+
+    @MainActor
+    func testLocalhostFileOverTransferLimitStillOpensWithoutDownloading() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("large.zip")
+        FileManager.default.createFile(atPath: file.path, contents: Data())
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: UInt64(ArtifactTransferPolicy.maximumBytes + 1))
+        try handle.close()
+        let profile = WorkspaceProfile(id: "local", name: "Local", gatewayURL: URL(string: "ws://localhost:18789")!, accent: "blue")
+        let store = ChatStore(profile: profile, transcriptCacheRoot: root.appendingPathComponent("transcripts"), operationsLedgerRoot: root.appendingPathComponent("operations"))
+        let item = Deliverable(id: "large", sessionKey: "a", messageID: "m", title: "large.zip", target: file.path, kind: "Package", sharedAt: nil)
+        let actual = await store.localDeliverableURL(item)
+        XCTAssertEqual(actual, file)
     }
 }
