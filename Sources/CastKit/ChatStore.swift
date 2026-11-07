@@ -2315,7 +2315,7 @@ public final class ChatStore {
     }
     func addAttachment(url: URL, target: AttachmentDraftTarget) {
         Task {
-            let result = await Task.detached { try AttachmentProcessor.prepare(url: url) }.result
+            let result = await Task.detached { try await AttachmentProcessor.prepareForSending(url: url) }.result
             finishAttachmentPreparation(result, target: target)
         }
     }

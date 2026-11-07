@@ -579,15 +579,17 @@ public final class WorkspaceManager: ObservableObject {
             do {
                 let fileItems = request.items.filter { $0.kind == .image || $0.kind == .file }
                 let attachments = try await Task.detached(priority: .userInitiated) {
-                    try fileItems.map { item -> PreparedAttachment in
+                    var prepared: [PreparedAttachment] = []
+                    for item in fileItems {
                         guard let url = inbox.fileURL(for: item, requestID: request.id) else {
                             throw ShareInboxError.invalidFile
                         }
-                        return try AttachmentProcessor.prepare(
+                        prepared.append(try await AttachmentProcessor.prepareForSending(
                             url: url,
                             originalFileName: item.fileName,
-                            typeIdentifier: item.typeIdentifier)
+                            typeIdentifier: item.typeIdentifier))
                     }
+                    return prepared
                 }.value
                 let sharedText = request.items.compactMap { item -> String? in
                     guard item.kind == .text || item.kind == .url else { return nil }

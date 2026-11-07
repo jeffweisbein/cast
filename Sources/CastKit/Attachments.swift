@@ -57,6 +57,14 @@ public enum AttachmentProcessor {
     public static let maxFileBytes = 16 * 1024 * 1024
     public static let maxFrameBytes = 24 * 1024 * 1024
 
+    public static func prepareForSending(url: URL, originalFileName: String? = nil, typeIdentifier: String? = nil) async throws -> PreparedAttachment {
+        let type = typeIdentifier.flatMap(UTType.init) ?? UTType(filenameExtension: url.pathExtension)
+        if VideoAttachments.isVideo(type) {
+            return try await VideoAttachments.prepare(url: url, fileName: originalFileName, typeIdentifier: typeIdentifier)
+        }
+        return try prepare(url: url, originalFileName: originalFileName, typeIdentifier: typeIdentifier)
+    }
+
     public static func prepare(
         url: URL,
         originalFileName: String? = nil,

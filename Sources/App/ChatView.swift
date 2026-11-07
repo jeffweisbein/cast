@@ -949,6 +949,8 @@ struct Composer: View, Equatable {
     @State private var sendPulse = 0
     @State private var showingPhotos = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var importingMedia = false
+    @State private var mediaImportID = UUID()
     @State private var photoImportTask: Task<Void, Never>?
     #endif
 
@@ -1054,14 +1056,16 @@ struct Composer: View, Equatable {
             isPresented: self.$showingPhotos,
             selection: self.$selectedPhotos,
             maxSelectionCount: 10,
-            matching: .images,
+            matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .automatic)
         .onChange(of: self.selectedPhotos) { _, items in
             guard !items.isEmpty else { return }
             self.selectedPhotos = []
             self.photoImportTask?.cancel()
-            let sessionKey = self.model.selectedSessionKey
-            self.photoImportTask = Task { await self.importPhotos(items, sessionKey: sessionKey) }
+            let target = self.store.attachmentDraftTarget
+            let importID = UUID()
+            self.mediaImportID = importID
+            self.photoImportTask = Task { await self.importPhotos(items, target: target, importID: importID) }
         }
         .onChange(of: self.model.selectedSessionKey) { _, _ in
             self.photoImportTask?.cancel()
@@ -1118,6 +1122,11 @@ struct Composer: View, Equatable {
 
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 6) {
+            #if os(iOS)
+            if self.importingMedia {
+                ProgressView("Preparing photos and videos…").font(.caption).padding(.horizontal, 8)
+            }
+            #endif
             if !self.model.pendingAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -1222,9 +1231,9 @@ struct Composer: View, Equatable {
         }
         #if os(iOS)
         Menu {
-            Button("Photo Library", systemImage: "photo.on.rectangle") {
+            Button(self.importingMedia ? "Preparing media…" : "Photos & Videos", systemImage: "photo.on.rectangle") {
                 self.showingPhotos = true
-            }
+            }.disabled(self.importingMedia)
             Button("Files", systemImage: "folder") {
                 self.importTarget = self.store.attachmentDraftTarget; self.importing = true
             }
@@ -1406,15 +1415,24 @@ struct Composer: View, Equatable {
     }
 
     #if os(iOS)
-    private func importPhotos(_ items: [PhotosPickerItem], sessionKey: String?) async {
+    private func importPhotos(_ items: [PhotosPickerItem], target: ChatStore.AttachmentDraftTarget, importID: UUID) async {
         var prepared: [PreparedAttachment] = []
-        var failedCount = 0
+        var failures: [String] = []
+        self.importingMedia = true
+        defer { if self.mediaImportID == importID { self.importingMedia = false } }
         for (index, item) in items.enumerated() {
             guard !Task.isCancelled else { return }
             do {
-                guard let data = try await item.loadTransferable(type: Data.self) else {
-                    failedCount += 1
+                if item.supportedContentTypes.contains(where: { VideoAttachments.isVideo($0) }) {
+                    guard let video = try await item.loadTransferable(type: PickedVideoAttachment.self) else {
+                        throw VideoAttachments.ImportError.invalidVideo
+                    }
+                    try Task.checkCancellation()
+                    prepared.append(video.attachment)
                     continue
+                }
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw AttachmentError.unreadable
                 }
                 guard !Task.isCancelled else { return }
                 let type = item.supportedContentTypes.first(where: { $0.conforms(to: .image) })
@@ -1427,16 +1445,13 @@ struct Composer: View, Equatable {
                 prepared.append(attachment)
             } catch {
                 guard !Task.isCancelled else { return }
-                failedCount += 1
+                failures.append(error.localizedDescription)
             }
         }
-        guard !Task.isCancelled, self.model.selectedSessionKey == sessionKey else { return }
+        guard !Task.isCancelled, self.store.attachmentDraftTarget == target else { return }
         if !prepared.isEmpty { self.store.addAttachments(prepared) }
-        if failedCount > 0 {
-            self.store.showError(
-                failedCount == 1
-                    ? "One selected photo could not be attached."
-                    : "\(failedCount) selected photos could not be attached.")
+        if let first = failures.first {
+            self.store.showError(failures.count == 1 ? first : "\(failures.count) selected items could not be attached. \(first)")
         }
     }
     #endif
@@ -1685,7 +1700,7 @@ struct AttachmentChip: View {
                     .frame(width: 36, height: 36)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
-                Image(systemName: self.attachment.type == "audio" ? "waveform" : "doc")
+                Image(systemName: self.attachment.mimeType.hasPrefix("video/") ? "video.fill" : (self.attachment.type == "audio" ? "waveform" : "doc"))
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
                     .frame(width: 24, height: 36)

@@ -77,6 +77,7 @@
 		42E5053F4F340BE649BB96A6 /* Parakeet-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = C086862527BFD6CA0AB3A02C /* Parakeet-LICENSE.txt */; };
 		439EBA0C5411BB09EAA83F09 /* ActionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E522C85C0D5CF8116663906B /* ActionPresentation.swift */; };
 		43B2038682B62F07FC2DC93E /* ActivationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E22240219174AE588FB3948 /* ActivationPolicyTests.swift */; };
+		4404F8FC86899E7D2857116D /* VideoAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE86A6F05B086B53F67D3A /* VideoAttachmentTests.swift */; };
 		450A2D18E358E4BFFE5CA4F8 /* CommandCenterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 935AED0D531A00A924A0CCCC /* CommandCenterTests.swift */; };
 		450A704BB3BC78FFA77FB11D /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 121EB44B3DAB52B378071C91 /* ChatStore.swift */; };
 		45C0EE53DBEE181111DDEF37 /* ReadReceiptQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623389AEDD78869A847412F1 /* ReadReceiptQueue.swift */; };
@@ -162,6 +163,7 @@
 		ABD0E6298675DDF7B270AFDE /* GatewayFailurePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFBB694DFB5C14C8B63F6AA3 /* GatewayFailurePolicy.swift */; };
 		AED9CECAC409F18A3CDC3581 /* GatewayFailurePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFBB694DFB5C14C8B63F6AA3 /* GatewayFailurePolicy.swift */; };
 		AF860C2EF388075A960FA386 /* CastUpdates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 167DF687B1565B6735F2185E /* CastUpdates.swift */; };
+		B0080578966DBE0D0B1CA829 /* VideoAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA676781FB05950232496238 /* VideoAttachments.swift */; };
 		B020282C3C1669080B34B188 /* CronRuns.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70EA302B974948F01D73B531 /* CronRuns.swift */; };
 		B03C02ECF3CEDAB5EADBD3E2 /* QuestionCardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 546F596EC52FEB4311D30A82 /* QuestionCardsView.swift */; };
 		B314EC9EEADACAD10C9D345E /* ReadReceiptQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623389AEDD78869A847412F1 /* ReadReceiptQueue.swift */; };
@@ -222,6 +224,7 @@
 		E69DA0665EF950C752705C6D /* SendOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC43A45315F2A3576ACDEF35 /* SendOutbox.swift */; };
 		E6A035500003FE8532516A39 /* HighlightSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 39CB5EFDC8EB018A4D49E1EB /* HighlightSwift */; };
 		E6B858CEA8918BCD5F1E09AA /* MacOSComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44200512284D7A336226F6AC /* MacOSComposerTextView.swift */; };
+		E6E38DC76521B4023C46E306 /* VideoAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA676781FB05950232496238 /* VideoAttachments.swift */; };
 		E773E707BB53EE7C6AD54672 /* swift-markdown-ui-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = FB4567EA8CA96A957862E804 /* swift-markdown-ui-LICENSE.txt */; };
 		E7971B3AF00BB624BDA28662 /* DesktopAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 562DCD82C42CA2B292A5D60E /* DesktopAccess.swift */; };
 		E8067B76F67CDF12A646F70C /* LibraryScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = E02FF81E2C492C716CF8143A /* LibraryScanner.swift */; };
@@ -393,6 +396,7 @@
 		C5452D126E3BE5DE5301FA13 /* SidebarPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarPreferences.swift; sourceTree = "<group>"; };
 		C78D4BF5719FB039C54D47BA /* LifecycleDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LifecycleDiagnostics.swift; sourceTree = "<group>"; };
 		CA2559E181D8C795D5531A59 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		CA676781FB05950232496238 /* VideoAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoAttachments.swift; sourceTree = "<group>"; };
 		CE78C6AC05B732ADC4701F6A /* CopyPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyPayloadTests.swift; sourceTree = "<group>"; };
 		D36A21F3D7CAA359353A7625 /* TaskDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetails.swift; sourceTree = "<group>"; };
 		D839BA24C58B5F0BD038D00D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -414,6 +418,7 @@
 		E92F43E5D28BEEDB84C08BE3 /* TranscriptNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptNavigation.swift; sourceTree = "<group>"; };
 		EB0209D768DFB43083985CEE /* TranscriptBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptBuilderTests.swift; sourceTree = "<group>"; };
 		EBB95AE848C4AEDCB8892433 /* ShareBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBridge.swift; sourceTree = "<group>"; };
+		EBDE86A6F05B086B53F67D3A /* VideoAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoAttachmentTests.swift; sourceTree = "<group>"; };
 		EC43A45315F2A3576ACDEF35 /* SendOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendOutbox.swift; sourceTree = "<group>"; };
 		F0BB4780906B28A2B9003843 /* swift-cmark-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "swift-cmark-LICENSE.txt"; sourceTree = "<group>"; };
 		F3C5AF26589F7C7102ABFC45 /* Cast-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Cast-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -551,6 +556,7 @@
 				C168095657E12DEDBBD78B62 /* TranscriptItems.swift */,
 				E92F43E5D28BEEDB84C08BE3 /* TranscriptNavigation.swift */,
 				1B5C3E50736995DED6165C5F /* UnreadLedger.swift */,
+				CA676781FB05950232496238 /* VideoAttachments.swift */,
 				203ED0D9E62BABE111C5C819 /* VoiceRecorder.swift */,
 				C118A92E06CF03A68EA82DD8 /* Workspace.swift */,
 			);
@@ -614,6 +620,7 @@
 				663FB546B3979653CF02CEFB /* TranscriptCacheWriteTests.swift */,
 				0364EA54F534ECCFB4B87FA5 /* TranscriptDuplicateCollapseTests.swift */,
 				DCCBA8720D4ADE78F1CCAC6B /* UXReliabilityTests.swift */,
+				EBDE86A6F05B086B53F67D3A /* VideoAttachmentTests.swift */,
 				C53CFD6D32C8B376CB844AD5 /* VoiceRecorderTests.swift */,
 				2B5763C1D16518B65EC1D3D8 /* Fixtures */,
 			);
@@ -924,6 +931,7 @@
 				3A12DA8FD0EACF73222FDF5C /* TranscriptCacheWriteTests.swift in Sources */,
 				D424521CD394292711B63A6D /* TranscriptDuplicateCollapseTests.swift in Sources */,
 				80DCE08A3D0CB8B4616F544B /* UXReliabilityTests.swift in Sources */,
+				4404F8FC86899E7D2857116D /* VideoAttachmentTests.swift in Sources */,
 				59888F13315AC3070F9D8B17 /* VoiceRecorderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1014,6 +1022,7 @@
 				7776DCE4AE898C3B1D9532C5 /* TranscriptNavigation.swift in Sources */,
 				FA964FB2AB65A1220F49C0FE /* UnreadInboxView.swift in Sources */,
 				EFED62BE221E4C0A29EA22A2 /* UnreadLedger.swift in Sources */,
+				B0080578966DBE0D0B1CA829 /* VideoAttachments.swift in Sources */,
 				26519CDC6D3C4954709AA06F /* VoiceMessageViews.swift in Sources */,
 				D35CE64CAEF2DE580AFB51D9 /* VoiceRecorder.swift in Sources */,
 				8278CF48CB0A3388C46FC535 /* Workspace.swift in Sources */,
@@ -1106,6 +1115,7 @@
 				8F417A63FA23003E1363C4E7 /* TranscriptNavigation.swift in Sources */,
 				427D9C30B3028D986698CC13 /* UnreadInboxView.swift in Sources */,
 				DB6267355ACE51ED405D40BB /* UnreadLedger.swift in Sources */,
+				E6E38DC76521B4023C46E306 /* VideoAttachments.swift in Sources */,
 				2EC8AEC893EEADE5A25C329B /* VoiceMessageViews.swift in Sources */,
 				71DADC3B4DAB1BA6A5C0799A /* VoiceRecorder.swift in Sources */,
 				429996E935699CE128620069 /* Workspace.swift in Sources */,

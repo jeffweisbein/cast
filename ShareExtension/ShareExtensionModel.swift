@@ -190,6 +190,16 @@ final class ShareExtensionModel: ObservableObject {
                 typeIdentifier: file.type.identifier)
         }
 
+        // Photos can advertise a still preview alongside a movie. Prefer the actual movie.
+        for identifier in provider.registeredTypeIdentifiers where UTType(identifier)?.conforms(to: .movie) == true {
+            let type = UTType(identifier) ?? .movie
+            let name = self.fileName(suggested: provider.suggestedName, fallbackBase: "Shared Video", type: type)
+            guard let url = await self.loadStagedFile(provider, typeIdentifier: identifier, fileName: name) else {
+                return nil // Never silently send a poster image when the movie could not be read.
+            }
+            return SharedItemInput(kind: .file, sourceFileURL: url, fileName: name, typeIdentifier: identifier)
+        }
+
         for identifier in self.imageTypeIdentifiers(for: provider) {
             let type = UTType(identifier) ?? .image
             let name = self.fileName(
