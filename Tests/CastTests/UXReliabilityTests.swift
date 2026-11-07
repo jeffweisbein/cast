@@ -3,6 +3,19 @@ import XCTest
 @testable import Cast
 
 final class UXReliabilityTests: XCTestCase {
+    @MainActor func testApprovalCapabilitiesAreUnknownUntilHelloAndResetOnReconnect() throws {
+        let store = ChatStore(transcriptCacheRoot: temp(), operationsLedgerRoot: temp())
+        XCTAssertEqual(store.approvalListKinds, ["exec", "plugin"])
+        let hello = try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"cast.hello","payload":{"features":{"methods":["exec.approval.list"]}}}"#.utf8))
+        store.handleEvent(hello)
+        XCTAssertEqual(store.approvalListKinds, ["exec"])
+        store.receiveState(.connecting, generation: 0)
+        XCTAssertEqual(store.approvalListKinds, ["exec", "plugin"])
+        let empty = try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"cast.hello","payload":{"features":{"methods":[]}}}"#.utf8))
+        store.handleEvent(empty)
+        XCTAssertTrue(store.approvalListKinds.isEmpty)
+    }
+
     private func item(_ id: String = "one") -> Deliverable {
         Deliverable(id: id, sessionKey: "a", messageID: "m", title: "Report.txt", target: "/report.txt", kind: "Document", sharedAt: nil)
     }

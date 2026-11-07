@@ -340,6 +340,7 @@ public final class ChatStore {
     public private(set) var sessions: [SessionRow] = []
     public private(set) var mainSessionKey: String?
     public private(set) var gatewayMethods: Set<String> = []
+    @ObservationIgnored private var gatewayMethodsKnown = false
     public private(set) var gatewayVersion: String?
     public private(set) var deliverableLedger = DeliverableLedger()
     public private(set) var reviewedWork = ReviewedWorkLedger()
@@ -1044,6 +1045,7 @@ public final class ChatStore {
     }
 
     private func handleState(_ state: GatewayConnectionState) {
+        if case .connecting = state { gatewayMethodsKnown = false }
         CastLifecycleDiagnostics.connectionState(Self.lifecycleStateLabel(state))
         self.connectionState = Self.presentedConnectionState(
             state,
@@ -2770,11 +2772,17 @@ public final class ChatStore {
         approvalActivity[id] = nil
     }
 
+    // Hello and connection callbacks cross onto MainActor independently. Before hello,
+    // query both read-only lists instead of mistaking unknown capabilities for unsupported.
+    var approvalListKinds: Set<String> {
+        guard gatewayMethodsKnown else { return ["exec", "plugin"] }
+        return Set([("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)]
+            .filter { gatewayMethods.contains($0.0) }.map { $0.1.rawValue })
+    }
+
     public func refreshApprovals() async {
         guard let client = self.client else { return }
-        let supported = [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)]
-            .filter { gatewayMethods.contains($0.0) }.map { $0.1.rawValue }
-        await refreshApprovals(supportedKinds: Set(supported)) { method in try await client.request(method: method, params: [:]) }
+        await refreshApprovals(supportedKinds: approvalListKinds) { method in try await client.request(method: method, params: [:]) }
     }
 
     // A live event invalidates a snapshot, but must not abandon previously unseen requests.
@@ -3326,6 +3334,7 @@ public final class ChatStore {
     }
 
     private func handleHello(_ event: EventFrame) {
+        gatewayMethodsKnown = true
         self.gatewayMethods = Set(event.payload?["features"]?["methods"]?.arrayValue?.compactMap(\.stringValue) ?? [])
         if !self.gatewayMethods.contains("sessions.compact") { self.contextCompactionOfferKey = nil }
         self.gatewayVersion = event.payload?["server"]?["version"]?.stringValue
