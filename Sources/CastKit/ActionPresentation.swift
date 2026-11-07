@@ -28,7 +28,7 @@ public enum ConnectionPresentation {
         case .connecting: return "Reconnecting…"
         case .waitingForApproval: return "Pairing approval needed"
         case .needsCredentials: return "Sign in to reconnect"
-        case .disconnected: return "Offline"
+        case .disconnected(let reason): return reason?.localizedCaseInsensitiveContains("restart") == true ? "Gateway restarting…" : "Offline"
         }
     }
     public static func detail(_ state: GatewayConnectionState, unconfirmed: Int) -> String {

@@ -57,6 +57,7 @@ struct ChatView: View {
     @State private var topVisibleItemID: String?
     @State private var showingFind = false
     @State private var findQuery = ""
+    @State private var findMatches: [String] = []
     @State private var findIndex = -1
     @State private var navigationJumpVersion = 0
     @State private var navigationNotice: String?
@@ -219,7 +220,7 @@ struct ChatView: View {
         ForEach(self.visibleItems) { item in
             self.itemView(item).id(item.id)
                 .overlay(alignment: .leading) {
-                    if showingFind, findMatches.indices.contains(findIndex), findMatches[findIndex] == item.id {
+                    if showingFind, currentFindMatchID == item.id {
                         RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 2).allowsHitTesting(false)
                     }
                 }
@@ -275,7 +276,7 @@ struct ChatView: View {
         #if os(macOS)
         .background(TranscriptWheelObserver { scrollingUp in
             var state = self.followState
-            if !scrollingUp && self.atBottom {
+            if TranscriptNavigation.shouldResumeForWheel(scrollingUp: scrollingUp, atBottom: atBottom, focused: focusedSearchItemID != nil) {
                 state.resume()
             } else {
                 state.scrollPhaseChanged(userDriven: true, isNearBottom: false)
@@ -544,11 +545,15 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
         .sheet(isPresented: $showingSecretRequests) { SecretRequestsView(store: store) }
+        .onChange(of: showingFind) { _, _ in refreshFindMatches() }
+        .onChange(of: store.transcriptRevision) { _, _ in refreshFindMatches() }
+        .onChange(of: showAgentWork) { _, _ in refreshFindMatches() }
         .onChange(of: store.selectedSessionKey) { _, _ in
             navigation.reset(); navigationJumpVersion += 1; topVisibleItemID = nil; findQuery = ""; findIndex = -1
-            showingFind = false; navigationNotice = nil
+            showingFind = false; findMatches = []; navigationNotice = nil
         }
         .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
             ConnectionStatusView(store: store)
             navigationControls
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -588,6 +593,8 @@ struct ChatView: View {
                     self.store.retryHistoryNow()
                 }
             }
+            }
+            .background(Theme.canvas)
         }
         .navigationTitle(self.title)
         #if os(iOS)
@@ -629,7 +636,12 @@ struct ChatView: View {
         }
     }
 
-    private var findMatches: [String] { TranscriptNavigation.matches(items, query: findQuery) }
+    private var currentFindMatchID: String? { findMatches.indices.contains(findIndex) ? findMatches[findIndex] : nil }
+    private func refreshFindMatches() {
+        let previous = currentFindMatchID
+        findMatches = showingFind ? TranscriptNavigation.matches(items, query: findQuery) : []
+        findIndex = previous.flatMap { findMatches.firstIndex(of: $0) } ?? -1
+    }
 
     private func rememberReadingPlace() {
         navigation.remember(followState.followsLatest ? .latest : .item(topVisibleItemID ?? visibleItems.first?.id ?? "streaming"))
@@ -645,7 +657,7 @@ struct ChatView: View {
             focusedSearchItemID = id
         } else { navigationNotice = "That reading place is no longer in the loaded conversation."; return }
         followState.scrollPhaseChanged(userDriven: true, isNearBottom: false)
-        nearBottom = false
+        nearBottom = false; atBottom = false
         Task { @MainActor in
             await Task.yield()
             guard session == store.selectedSessionKey, version == navigationJumpVersion else { return }
@@ -689,8 +701,8 @@ struct ChatView: View {
             if showingFind {
                 HStack {
                     TextField("Find in loaded conversation", text: $findQuery)
-                        .textFieldStyle(.roundedBorder).onSubmit { find(0) }
-                        .onChange(of: findQuery) { _, _ in findIndex = -1 }
+                        .textFieldStyle(.roundedBorder).onSubmit { find(1) }
+                        .onChange(of: findQuery) { _, _ in findIndex = -1; refreshFindMatches() }
                     Text(findQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 ? "2+ characters" : findMatches.isEmpty ? "No matches" : findIndex < 0 ? "\(findMatches.count) matches" : "\(min(findIndex + 1, findMatches.count))/\(findMatches.count)\(findMatches.count == 200 ? "+" : "")")
                         .font(.caption).monospacedDigit()
                     Button("Previous match", systemImage: "chevron.up") { find(-1) }.labelStyle(.iconOnly).disabled(findMatches.isEmpty)

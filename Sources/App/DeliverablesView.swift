@@ -16,26 +16,23 @@ struct DeliverablesView: View {
     @State private var syncing = false
     @State private var syncError: String?
 
-    private var allItems: [Deliverable] {
-        var indexed = Dictionary(store.deliverableLedger.items.map { (DownloadCenter.key($0), $0) }, uniquingKeysWith: { first, _ in first })
-        for entry in store.downloads.sorted { indexed[entry.id] = entry.item }
-        return indexed.values.sorted { ($0.sharedAt ?? 0, $0.id) > ($1.sharedAt ?? 0, $1.id) }
-    }
-    private var items: [Deliverable] {
-        allItems.filter {
-            (initialItemID == nil || $0.id == initialItemID) && (sessionKey == nil || SessionKeyMatcher.matches(sessionKey, $0.sessionKey))
-                && (query.isEmpty || ($0.title + " " + $0.kind).localizedCaseInsensitiveContains(query))
-                && (!downloadsOnly || store.downloads.entry(for: $0) != nil)
+    private var rows: [DownloadCenter.Row] {
+        store.downloads.rows(ledger: store.deliverableLedger.items).filter { row in
+            let item = row.item
+            return (initialItemID == nil || item.id == initialItemID) && (sessionKey == nil || SessionKeyMatcher.matches(sessionKey, item.sessionKey))
+                && (query.isEmpty || (item.title + " " + item.kind).localizedCaseInsensitiveContains(query))
+                && (!downloadsOnly || row.entry != nil)
         }.sorted { left, right in
-            let a = store.downloads.entry(for: left), b = store.downloads.entry(for: right)
-            if a?.phase.isActive != b?.phase.isActive { return a?.phase.isActive == true }
-            if downloadsOnly { return (a?.updatedAt ?? .distantPast) > (b?.updatedAt ?? .distantPast) }
-            return (left.sharedAt ?? 0, left.id) > (right.sharedAt ?? 0, right.id)
+            let a = left.entry, b = right.entry
+            if (a?.phase.isActive == true) != (b?.phase.isActive == true) { return a?.phase.isActive == true }
+            if downloadsOnly { return (a?.updatedAt ?? .distantPast, left.id) > (b?.updatedAt ?? .distantPast, right.id) }
+            return (left.item.sharedAt ?? 0, left.id) > (right.item.sharedAt ?? 0, right.id)
         }
     }
 
     var body: some View {
         NavigationStack {
+            let rows = self.rows
             List {
                 Section {
                     Picker("Show", selection: $downloadsOnly) {
@@ -50,26 +47,27 @@ struct DeliverablesView: View {
                     if let syncError { Text(syncError).font(.caption).foregroundStyle(.secondary) }
                     Text("Refresh checks the selected conversation and up to 12 recent conversations. Open an older chat to include it.").font(.caption).foregroundStyle(.secondary)
                 }
-                if self.items.isEmpty {
+                if rows.isEmpty {
                     ContentUnavailableView(downloadsOnly ? "No downloads yet" : "No deliverables yet", systemImage: "tray",
                         description: Text(downloadsOnly ? "Choose All files & links to download a file. Saved files from this workspace appear here after checking the local cache." : "Open a conversation containing a report or file link to add it here."))
                 }
-                ForEach(self.items) { item in
+                ForEach(rows) { row in
+                    let item = row.item
                     DeliverableRow(item: item, store: self.store) {
                         self.store.selectedSessionKey = item.sessionKey
                         self.dismiss()
                     }
-                    .id("\(item.reviewID):\(item.sizeBytes ?? -1):\(item.title):\(item.mimeType ?? "")") // Revisions/metadata changes cannot reuse an old row's download state.
+                    .id(row.id)
                 }
             }
             .onAppear { downloadsOnly = startsWithDownloads }
             .task {
-                for item in allItems where item.webURL == nil {
+                for item in store.deliverableLedger.items where item.webURL == nil {
                     if Task.isCancelled { return }
-                    await store.downloads.inspect(item) { await store.localDeliverableURL(item) }
+                    await store.inspectDownload(item)
                 }
-                await sync()
             }
+            .task { await sync() }
             .refreshable { await sync() }
             .searchable(text: self.$query, prompt: "Search deliverables")
             .navigationTitle(downloadsOnly ? "Downloads" : "Deliverables")
@@ -131,7 +129,7 @@ struct DeliverableRow: View {
         }
         .padding(.vertical, 6)
         .task(id: self.item.reviewID) {
-            await store.downloads.inspect(item) { await store.localDeliverableURL(item) }
+            await store.inspectDownload(item)
         }
         .quickLookPreview(self.$previewURL)
         .fileExporter(isPresented: $exporting, document: cachedURL.map { DownloadExport(url: $0) },

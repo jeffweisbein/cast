@@ -18,7 +18,7 @@ struct ConnectionStatusView: View {
                     Spacer()
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                 }.font(.caption)
-            }.buttonStyle(.plain).accessibilityLabel("Connection status: " + ConnectionPresentation.title(store.connectionState))
+            }.buttonStyle(.plain).accessibilityLabel("Connection status: " + ConnectionPresentation.title(store.connectionState) + (unconfirmed > 0 ? ", \(unconfirmed) unconfirmed messages" : ""))
             if expanded || !connected || unconfirmed > 0 {
                 Text(ConnectionPresentation.detail(store.connectionState, unconfirmed: unconfirmed))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

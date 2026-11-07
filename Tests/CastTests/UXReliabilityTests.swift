@@ -101,6 +101,7 @@ final class UXReliabilityTests: XCTestCase {
             return .group(TranscriptGroup(id: "g\(index)", role: message.role, messages: [message], date: nil))
         }
         XCTAssertEqual(TranscriptNavigation.matches(items, query: "find").count, 200)
+        XCTAssertEqual(TranscriptNavigation.matches(items, query: "find").last, "g499")
         XCTAssertTrue(TranscriptNavigation.matches(items, query: " ").isEmpty)
         XCTAssertEqual(TranscriptNavigation.latestReply(items), "g498")
         XCTAssertLessThanOrEqual(TranscriptWindow.searchRange(index: 250, total: 500).count, 200)
@@ -109,5 +110,64 @@ final class UXReliabilityTests: XCTestCase {
         XCTAssertTrue(ConnectionPresentation.detail(.connected(mainSessionKey: nil), unconfirmed: 1).contains("still need gateway confirmation"))
         XCTAssertTrue(ConnectionPresentation.detail(.disconnected(nil), unconfirmed: 0).contains("Nothing is resent automatically"))
     }
+    @MainActor func testDownloadRowsKeepRevisionIDsUniqueAndProjectionFast() async {
+        let center = DownloadCenter()
+        let old = item()
+        let revised = Deliverable(id: old.id, sessionKey: old.sessionKey, messageID: "revised", title: old.title, target: old.target, kind: old.kind, sharedAt: 1)
+        await center.inspect(old) { URL(fileURLWithPath: "/old") }
+        let rows = center.rows(ledger: [revised])
+        XCTAssertEqual(rows.count, 2); XCTAssertEqual(Set(rows.map(\.id)).count, 2)
+        let ledger = (0..<1000).map { item("file-\($0)") }
+        let start = Date()
+        for _ in 0..<20 { XCTAssertEqual(center.rows(ledger: ledger).count, 1001) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2, "1,000-item projection blocks interactive updates")
+    }
+    @MainActor func testUnavailableInspectionKeepsSavedFileAndItsOrder() async {
+        let center = DownloadCenter(), file = item()
+        await center.inspect(file) { URL(fileURLWithPath: "/saved") }
+        let initial = center.entry(for: file)
+        await center.inspect(file) { throw CancellationError() }
+        XCTAssertEqual(center.entry(for: file), initial)
+        await center.inspect(file) { URL(fileURLWithPath: "/saved") }
+        XCTAssertEqual(center.entry(for: file), initial)
+    }
+    func testDownwardWheelDoesNotResumeFollowingFocusedSearch() {
+        XCTAssertFalse(TranscriptNavigation.shouldResumeForWheel(scrollingUp: false, atBottom: true, focused: true))
+        XCTAssertTrue(TranscriptNavigation.shouldResumeForWheel(scrollingUp: false, atBottom: true, focused: false))
+        XCTAssertFalse(TranscriptNavigation.shouldResumeForWheel(scrollingUp: true, atBottom: true, focused: false))
+    }
+    @MainActor func testApprovalRefreshExhaustionAndRelisting() async throws {
+        let store = ChatStore(transcriptCacheRoot: temp(), operationsLedgerRoot: temp())
+        let event = try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"exec.approval.requested","payload":{"id":"A","request":{"command":"A"}}}"#.utf8))
+        var calls = 0
+        await store.refreshApprovals { _ in
+            calls += 1; store.handleEvent(event); return Data("[]".utf8)
+        }
+        XCTAssertEqual(calls, 3); XCTAssertNotNil(store.approvalRefreshError)
+        await store.refreshApprovals { _ in Data("[]".utf8) }
+        XCTAssertEqual(store.approvalActivity["A"]?.state, .unavailable)
+        await store.refreshApprovals(supportedKinds: ["exec"]) { method in
+            XCTAssertEqual(method, "exec.approval.list")
+            return Data(#"[{"id":"A","request":{"command":"A"}}]"#.utf8)
+        }
+        XCTAssertNil(store.approvalActivity["A"]); XCTAssertNil(store.approvalRefreshError)
+    }
+    @MainActor func testStaleApprovalSnapshotCannotClearLostAcknowledgement() async throws {
+        let store = ChatStore(transcriptCacheRoot: temp(), operationsLedgerRoot: temp())
+        let event = try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"exec.approval.requested","payload":{"id":"A","request":{"command":"A"}}}"#.utf8))
+        store.handleEvent(event)
+        var calls = 0
+        await store.refreshApprovals(supportedKinds: ["exec"]) { _ in
+            calls += 1
+            if calls == 1 {
+                await store.resolveApproval(id: "A", decision: "allow-once") { _, _ in throw URLError(.timedOut) }
+                return Data(#"[{"id":"A","request":{"command":"A"}}]"#.utf8)
+            }
+            throw URLError(.notConnectedToInternet)
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(store.approvalActivity["A"]?.state, .uncertain)
+    }
+
     private func temp() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
 }

@@ -10,7 +10,7 @@ struct ReliabilityFixtureView: View {
             if mode == "downloads" { DeliverablesView(store: store, startsWithDownloads: true) }
             else if mode == "needs" { NeedsYouView(store: store) }
             else { ChatView(store: store, allowsSending: false) }
-        }.task {
+        }.frame(width: 1000, height: 760).task {
             store.installOfflineDiagnosticTranscript((0..<420).map { i in
                 ChatMessage(id: "fixture-\(i)", role: i % 2 == 0 ? "user" : "assistant",
                     blocks: [ChatContentBlock(type: "text", text: i % 2 == 0 ? "Can you check the report \(i)?" : "Report \(i) is ready. The changes are verified locally; delivery still needs confirmation.", thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: Double(1_790_000_000_000 + i * 1000))

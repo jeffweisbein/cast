@@ -8,6 +8,15 @@ struct NeedsYouView: View {
     @State private var detailItem: AttentionItem?
     @State private var reviewSessionKey: String?
     @State private var showRecent = false
+    @State private var refreshing = false
+    private var isConnected: Bool { if case .connected = store.connectionState { return true }; return false }
+    private func refresh() async {
+        guard !refreshing, isConnected else { return }
+        refreshing = true; defer { refreshing = false }
+        await store.refreshSessions()
+        await store.refreshApprovals()
+        await store.refreshQuestions()
+    }
 
     var body: some View {
         NavigationStack {
@@ -63,12 +72,15 @@ struct NeedsYouView: View {
                 }
             }
             .navigationTitle("Needs you")
-            .refreshable {
-                await self.store.refreshSessions()
-                await self.store.refreshApprovals()
-                await self.store.refreshQuestions()
+            .task { await refresh() }
+            .refreshable { await refresh() }
+            .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    Button(refreshing ? "Refreshing…" : "Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }
+                        .disabled(refreshing || !isConnected)
+                }
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { self.dismiss() } }
             }
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { self.dismiss() } } }
             .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
             .sheet(item: $detailItem) { item in TaskDetailView(store: store, taskID: nil, sessionKey: item.sessionKey) }
             .sheet(isPresented: self.$showingDeliverables) {

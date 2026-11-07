@@ -176,6 +176,9 @@ struct WorkspaceContentView: View {
                 Divider()
                 SessionListView(store: self.store) { self.showingActivity = true }
                 Divider()
+                #if os(iOS)
+                ConnectionStatusView(store: store)
+                #endif
                 Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
                     .buttonStyle(.plain).padding(10)
             }

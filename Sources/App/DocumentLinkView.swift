@@ -9,7 +9,11 @@ struct DocumentLinkView: View {
     let link: DocumentLink
     let store: ChatStore
     @Environment(\.dismiss) private var dismiss
-    private var item: Deliverable { link.deliverable(in: store.deliverableLedger.items) }
+    @State private var item: Deliverable
+    init(link: DocumentLink, store: ChatStore) {
+        self.link = link; self.store = store
+        _item = State(initialValue: link.deliverable(in: store.deliverableLedger.items))
+    }
     private var entry: DownloadCenter.Entry? { store.downloads.entry(for: item) }
     private var localURL: URL? { if case .saved(let url) = entry?.phase { return url }; return nil }
     private var loading: Bool { entry?.phase.isActive == true }
@@ -57,7 +61,7 @@ struct DocumentLinkView: View {
         .frame(minWidth: 520, minHeight: 280)
         #endif
         .task {
-            await store.downloads.inspect(item) { await store.localDeliverableURL(item) }
+            await store.inspectDownload(item)
             if !Task.isCancelled, entry == nil { download() }
         }
         .quickLookPreview($previewURL)

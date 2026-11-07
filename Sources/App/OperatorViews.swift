@@ -54,6 +54,7 @@ struct ApprovalCardView: View {
             if !isConnected { Text("Reconnect to submit a decision.").font(.caption).foregroundStyle(.secondary) }
             if state == .submitting { ProgressView("Waiting for confirmation…") }
             if state == .uncertain {
+                if let error = store.approvalRefreshError { Text(error).font(.caption).foregroundStyle(.secondary) }
                 Button("Refresh status") { Task { await store.refreshApprovals() } }.disabled(!isConnected)
             }
             HStack {

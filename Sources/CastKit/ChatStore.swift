@@ -2727,7 +2727,9 @@ public final class ChatStore {
 
     public func resolveApproval(id: String, decision: String) {
         guard let client, case .connected = connectionState else { return }
+        let generation = clientGeneration
         Task {
+            guard generation == clientGeneration else { return }
             await resolveApproval(id: id, decision: decision) { method, params in
                 _ = try await client.request(method: method, params: params)
             }
@@ -2740,6 +2742,7 @@ public final class ChatStore {
               approval.allows(decision: decision),
               approvalActivity[id]?.state != .submitting, approvalActivity[id]?.state != .uncertain else { return }
         let generation = clientGeneration
+        approvalRevision &+= 1
         recordApproval(approval, state: .submitting, detail: "Waiting for the gateway to confirm your decision.")
         do {
             try await request(approval.kind == .plugin ? "plugin.approval.resolve" : "exec.approval.resolve",
@@ -2750,6 +2753,7 @@ public final class ChatStore {
             recordApproval(approval, state: .confirmed, detail: "The gateway recorded your decision. This does not confirm the action ran successfully.")
         } catch {
             guard generation == clientGeneration, approvalActivity[id]?.state == .submitting else { return }
+            approvalRevision &+= 1
             recordApproval(approval, state: .uncertain, detail: "Your decision was not confirmed. Refresh status before trying again; Cast will not resend it automatically.")
         }
     }
@@ -2768,19 +2772,25 @@ public final class ChatStore {
 
     public func refreshApprovals() async {
         guard let client = self.client else { return }
-        await refreshApprovals { method in try await client.request(method: method, params: [:]) }
+        let supported = [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)]
+            .filter { gatewayMethods.contains($0.0) }.map { $0.1.rawValue }
+        await refreshApprovals(supportedKinds: Set(supported)) { method in try await client.request(method: method, params: [:]) }
     }
 
     // A live event invalidates a snapshot, but must not abandon previously unseen requests.
     // Retry a bounded number of times with a fresh revision; never replay a decision.
-    func refreshApprovals(request: (String) async throws -> Data) async {
+    func refreshApprovals(supportedKinds: Set<String> = ["exec", "plugin"], request: (String) async throws -> Data) async {
+        guard !supportedKinds.isEmpty else {
+            approvalRefreshError = "This gateway does not expose approval lists. Live requests still appear here."
+            return
+        }
         let generation = clientGeneration
         for _ in 0..<3 {
             guard !Task.isCancelled, generation == clientGeneration else { return }
             let revision = approvalRevision
             var replayed = approvals
             var successfulKinds: Set<String> = []
-            for (method, kind) in [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)] {
+            for (method, kind) in [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)] where supportedKinds.contains(kind.rawValue) {
                 guard !Task.isCancelled, generation == clientGeneration else { return }
                 if revision != approvalRevision { break }
                 guard let data = try? await request(method),
@@ -2793,7 +2803,7 @@ public final class ChatStore {
             }
             guard !Task.isCancelled, generation == clientGeneration else { return }
             if revision != approvalRevision { continue }
-            approvalRefreshError = successfulKinds.count == 2 ? nil : "Some approval requests could not be refreshed. Previously seen requests are kept; reconnect and refresh to check for more."
+            approvalRefreshError = successfulKinds == supportedKinds ? nil : "Some approval requests could not be refreshed. Previously seen requests are kept; reconnect and refresh to check for more."
             guard !successfulKinds.isEmpty else { return }
             for old in approvals where successfulKinds.contains(old.kind.rawValue) {
                 if old.isExpired {
@@ -2806,11 +2816,25 @@ public final class ChatStore {
                     approvalActivity[old.id] = nil // Authoritative pending read permits another deliberate decision.
                 }
             }
+            for approval in replayed where successfulKinds.contains(approval.kind.rawValue) && !approval.isExpired {
+                if let activity = approvalActivity[approval.id], [.expired, .unavailable].contains(activity.state) {
+                    approvalActivity[approval.id] = nil
+                }
+            }
             approvalRevision &+= 1
             approvals = Self.dedupedByID(replayed.filter { !$0.isExpired })
             return
         }
         approvalRefreshError = "Requests changed while refreshing. Live updates are kept; refresh again to check for any missing requests."
+    }
+
+    public func inspectDownload(_ item: Deliverable) async {
+        let generation = clientGeneration
+        await downloads.inspect(item) {
+            let url = await self.localDeliverableURL(item)
+            guard !Task.isCancelled, generation == self.clientGeneration else { throw CancellationError() }
+            return url
+        }
     }
 
     public func startDownload(_ item: Deliverable) {
@@ -3326,6 +3350,9 @@ public final class ChatStore {
     private func handleApprovalRequested(_ event: EventFrame, kind: ApprovalKind) {
         guard var approval = self.decodePayload(event, as: ExecApproval.self), !approval.isExpired else { return }
         approval.kind = kind
+        if let activity = approvalActivity[approval.id], [.expired, .unavailable].contains(activity.state) {
+            approvalActivity[approval.id] = nil
+        }
         approvalRevision &+= 1
         self.approvals.removeAll { $0.id == approval.id }
         self.approvals.append(approval)

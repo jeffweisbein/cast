@@ -97,14 +97,6 @@ struct QuestionCardView: View {
     }
 
     private var isConnected: Bool { if case .connected = store.connectionState { return true }; return false }
-    private func statusLabel(_ status: String) -> String {
-        switch status {
-        case "answered": return "Answered"
-        case "cancelled": return "Question cancelled"
-        case "unavailable": return "Question unavailable"
-        default: return "Question expired"
-        }
-    }
     private func conversationTitle(_ request: QuestionRequest) -> String {
         if let session = store.sessions.first(where: { request.belongs(to: $0.key) }) { return session.title }
         return request.sessionKey ?? request.agentId.map { "Agent: " + $0 } ?? "Workspace question"
