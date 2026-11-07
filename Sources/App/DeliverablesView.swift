@@ -9,15 +9,28 @@ struct DeliverablesView: View {
     let store: ChatStore
     var sessionKey: String? = nil
     var initialItemID: String? = nil
+    var startsWithDownloads = false
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var downloadsOnly = false
     @State private var syncing = false
     @State private var syncError: String?
 
+    private var allItems: [Deliverable] {
+        var indexed = Dictionary(store.deliverableLedger.items.map { (DownloadCenter.key($0), $0) }, uniquingKeysWith: { first, _ in first })
+        for entry in store.downloads.sorted { indexed[entry.id] = entry.item }
+        return indexed.values.sorted { ($0.sharedAt ?? 0, $0.id) > ($1.sharedAt ?? 0, $1.id) }
+    }
     private var items: [Deliverable] {
-        self.store.deliverableLedger.items.filter {
-            (initialItemID == nil || $0.id == initialItemID) && (self.sessionKey == nil || SessionKeyMatcher.matches(self.sessionKey, $0.sessionKey))
-                && (self.query.isEmpty || ($0.title + " " + $0.kind).localizedCaseInsensitiveContains(self.query))
+        allItems.filter {
+            (initialItemID == nil || $0.id == initialItemID) && (sessionKey == nil || SessionKeyMatcher.matches(sessionKey, $0.sessionKey))
+                && (query.isEmpty || ($0.title + " " + $0.kind).localizedCaseInsensitiveContains(query))
+                && (!downloadsOnly || store.downloads.entry(for: $0) != nil)
+        }.sorted { left, right in
+            let a = store.downloads.entry(for: left), b = store.downloads.entry(for: right)
+            if a?.phase.isActive != b?.phase.isActive { return a?.phase.isActive == true }
+            if downloadsOnly { return (a?.updatedAt ?? .distantPast) > (b?.updatedAt ?? .distantPast) }
+            return (left.sharedAt ?? 0, left.id) > (right.sharedAt ?? 0, right.id)
         }
     }
 
@@ -25,7 +38,11 @@ struct DeliverablesView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Files and links from conversations you’ve opened. Downloads are saved on this device. Sharing a result is not proof it was deployed or approved.")
+                    Picker("Show", selection: $downloadsOnly) {
+                        Text("All files & links").tag(false)
+                        Text("Downloads").tag(true)
+                    }.pickerStyle(.segmented)
+                    Text("Downloads stay on this device. You can close this window while a file downloads; keep Cast open. Attempts are not resumed automatically after quitting.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section {
@@ -34,8 +51,8 @@ struct DeliverablesView: View {
                     Text("Refresh checks the selected conversation and up to 12 recent conversations. Open an older chat to include it.").font(.caption).foregroundStyle(.secondary)
                 }
                 if self.items.isEmpty {
-                    ContentUnavailableView("No deliverables yet", systemImage: "tray",
-                        description: Text("Open a conversation containing a report or file link to add it here."))
+                    ContentUnavailableView(downloadsOnly ? "No downloads yet" : "No deliverables yet", systemImage: "tray",
+                        description: Text(downloadsOnly ? "Choose All files & links to download a file. Saved files from this workspace appear here after checking the local cache." : "Open a conversation containing a report or file link to add it here."))
                 }
                 ForEach(self.items) { item in
                     DeliverableRow(item: item, store: self.store) {
@@ -45,10 +62,17 @@ struct DeliverablesView: View {
                     .id("\(item.reviewID):\(item.sizeBytes ?? -1):\(item.title):\(item.mimeType ?? "")") // Revisions/metadata changes cannot reuse an old row's download state.
                 }
             }
-            .task { await sync() }
+            .onAppear { downloadsOnly = startsWithDownloads }
+            .task {
+                for item in allItems where item.webURL == nil {
+                    if Task.isCancelled { return }
+                    await store.downloads.inspect(item) { await store.localDeliverableURL(item) }
+                }
+                await sync()
+            }
             .refreshable { await sync() }
             .searchable(text: self.$query, prompt: "Search deliverables")
-            .navigationTitle("Deliverables")
+            .navigationTitle(downloadsOnly ? "Downloads" : "Deliverables")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { self.dismiss() } } }
         }
         #if os(macOS)
@@ -72,18 +96,17 @@ struct DeliverablesView: View {
 
 }
 
-private struct DeliverableRow: View {
+struct DeliverableRow: View {
     let item: Deliverable
     let store: ChatStore
     let openConversation: () -> Void
     @Environment(\.openURL) private var openURL
-    @State private var cachedURL: URL?
     @State private var previewURL: URL?
-    @State private var loading = false
     @State private var error: String?
-    @State private var downloadTask: Task<Void, Never>?
-    @State private var received = 0
-    @State private var total: Int?
+    private var entry: DownloadCenter.Entry? { store.downloads.entry(for: item) }
+    private var cachedURL: URL? {
+        if case .saved(let url) = entry?.phase { return url }; return nil
+    }
     @State private var exporting = false
 
     var body: some View {
@@ -108,14 +131,18 @@ private struct DeliverableRow: View {
         }
         .padding(.vertical, 6)
         .task(id: self.item.reviewID) {
-            if let url = await self.store.localDeliverableURL(self.item), !Task.isCancelled { self.cachedURL = url }
+            await store.downloads.inspect(item) { await store.localDeliverableURL(item) }
         }
         .quickLookPreview(self.$previewURL)
-        .onDisappear { downloadTask?.cancel() }
         .fileExporter(isPresented: $exporting, document: cachedURL.map { DownloadExport(url: $0) },
                       contentType: .data, defaultFilename: cachedURL?.lastPathComponent) { result in
             if case .failure = result { error = "Couldn’t save the file to that location. Try another folder." }
         }
+    }
+
+    private var canDownload: Bool {
+        guard case .connected = store.connectionState else { return false }
+        return store.gatewayMethods.contains(item.artifactID == nil ? "sessions.files.get" : "artifacts.download")
     }
 
     @ViewBuilder private var actions: some View {
@@ -131,26 +158,28 @@ private struct DeliverableRow: View {
             ShareLink(item: url)
             Text("On this device").font(.caption2).foregroundStyle(.secondary)
         } else {
-            Button(self.loading ? "Fetching…" : "Get file", systemImage: "arrow.down.doc") {
-                self.loading = true
-                received = 0; total = item.sizeBytes; error = nil
-                downloadTask = Task {
-                    defer { self.loading = false }
-                    do {
-                        self.cachedURL = try await self.store.fetchDeliverable(self.item) { count, expected in
-                            await MainActor.run { self.received = count; self.total = expected }
-                        }
-                        self.error = nil
-                    } catch is CancellationError { self.error = "Download cancelled. You can retry." }
-                    catch { self.error = error.localizedDescription }
+            if let entry {
+                switch entry.phase {
+                case .downloading:
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let total = entry.total, total > 0 {
+                            ProgressView(value: Double(min(entry.received, total)), total: Double(total))
+                            Text("\(ByteCountFormatter.string(fromByteCount: Int64(entry.received), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))")
+                        } else { ProgressView("Downloading…") }
+                    }.font(.caption).frame(maxWidth: 230)
+                    Button("Cancel") { store.downloads.cancel(item) }
+                case .failed(let message): Text(message).font(.caption).foregroundStyle(.red)
+                case .cancelled: Text("Cancelled — retry when you’re ready.").font(.caption).foregroundStyle(.secondary)
+                case .saved: EmptyView()
                 }
             }
-            .disabled(self.loading || !(self.store.gatewayMethods.contains(item.artifactID == nil ? "sessions.files.get" : "artifacts.download")))
-            .help("Download this attachment from its authorized conversation")
-            if loading {
-                if let total, total > 0 { ProgressView(value: Double(received), total: Double(total)).frame(width: 90) }
-                else { ProgressView().controlSize(.small) }
-                Button("Cancel") { downloadTask?.cancel() }
+            if entry?.phase.isActive != true {
+                Button(entry == nil ? "Get file" : "Retry download", systemImage: "arrow.down.doc") {
+                    error = nil; store.startDownload(item)
+                }
+                .disabled(!canDownload)
+                .help("Download this attachment from its authorized conversation")
+                if !canDownload { Text("Reconnect to download this file.").font(.caption).foregroundStyle(.secondary) }
             }
         }
         Button("Conversation", action: self.openConversation)

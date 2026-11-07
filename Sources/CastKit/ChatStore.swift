@@ -394,6 +394,9 @@ public final class ChatStore {
     @ObservationIgnored private var compactingSessionKeys: [String: UUID] = [:]
     public private(set) var sessionsSyncNotice: String?
     public private(set) var approvals: [ExecApproval] = []
+    public private(set) var approvalActivity: [String: ApprovalActivity] = [:]
+    public private(set) var approvalRefreshError: String?
+    public let downloads = DownloadCenter()
     public var questionInbox = QuestionInbox()
     @ObservationIgnored private var questionExpiryTask: Task<Void, Never>?
     public private(set) var questionError: String?
@@ -932,6 +935,9 @@ public final class ChatStore {
             deviceFamily: family,
             displayName: "Cast",
             secretEntryEnabled: self.secretEntryEnabled, questionsEnabled: self.questionsEnabled)
+        for activity in approvalActivity.values where activity.state == .submitting {
+            recordApproval(activity.approval, state: .uncertain, detail: "Connection changed before confirmation. Refresh status before deciding again.")
+        }
         self.clientGeneration &+= 1
         let generation = self.clientGeneration
         let client = GatewayClient(
@@ -958,6 +964,8 @@ public final class ChatStore {
         self.questionError = nil
         if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
             attachmentDrafts.removeAll(); unselectedAttachments = []
+            downloads.reset()
+            approvals = []; approvalActivity = [:]; approvalRefreshError = nil; approvalRevision &+= 1
         }
         self.profile = profile
         self.restartWithStoredCredential()
@@ -968,6 +976,9 @@ public final class ChatStore {
         self.compactingSessionKeys.removeAll()
         self.secretRequests = []
         self.secretRevision += 1
+        for activity in approvalActivity.values where activity.state == .submitting {
+            recordApproval(activity.approval, state: .uncertain, detail: "Connection changed before confirmation. Refresh status before deciding again.")
+        }
         self.clientGeneration &+= 1
         let previous = self.client
         self.client = nil
@@ -990,6 +1001,9 @@ public final class ChatStore {
         self.isSuspendedForBackground = true
         self.secretRequests = []
         self.secretRevision += 1
+        for activity in approvalActivity.values where activity.state == .submitting {
+            recordApproval(activity.approval, state: .uncertain, detail: "Connection changed before confirmation. Refresh status before deciding again.")
+        }
         self.clientGeneration &+= 1
         CastLifecycleDiagnostics.gatewayTransition("suspend")
         self.agentIdentityTask?.cancel()
@@ -2712,28 +2726,44 @@ public final class ChatStore {
     }
 
     public func resolveApproval(id: String, decision: String) {
-        guard let client = self.client else { return }
-        guard let approval = self.approvals.first(where: { $0.id == id }),
-              !approval.isExpired, approval.allows(decision: decision) else {
-            self.lastError = "That approval has expired, was resolved elsewhere, or does not allow this decision. Refresh Needs you."
-            return
-        }
-        // The wire never carries the kind, so route by the tag stamped at receipt.
-        let method = approval.kind == .plugin
-            ? "plugin.approval.resolve"
-            : "exec.approval.resolve"
-        let generation = clientGeneration
+        guard let client, case .connected = connectionState else { return }
         Task {
-            do {
-                _ = try await client.request(method: method, params: ["id": id, "decision": decision])
-                guard generation == clientGeneration else { return }
-                approvalRevision &+= 1
-                self.approvals.removeAll { $0.id == id }
-            } catch {
-                guard generation == clientGeneration else { return }
-                self.lastError = "Approval: \(error.localizedDescription)"
+            await resolveApproval(id: id, decision: decision) { method, params in
+                _ = try await client.request(method: method, params: params)
             }
         }
+    }
+
+    func resolveApproval(id: String, decision: String,
+                         request: (String, [String: AnyCodable]) async throws -> Void) async {
+        guard let approval = approvals.first(where: { $0.id == id }), !approval.isExpired,
+              approval.allows(decision: decision),
+              approvalActivity[id]?.state != .submitting, approvalActivity[id]?.state != .uncertain else { return }
+        let generation = clientGeneration
+        recordApproval(approval, state: .submitting, detail: "Waiting for the gateway to confirm your decision.")
+        do {
+            try await request(approval.kind == .plugin ? "plugin.approval.resolve" : "exec.approval.resolve",
+                              ["id": AnyCodable(id), "decision": AnyCodable(decision)])
+            guard generation == clientGeneration else { return }
+            approvalRevision &+= 1
+            approvals.removeAll { $0.id == id }
+            recordApproval(approval, state: .confirmed, detail: "The gateway recorded your decision. This does not confirm the action ran successfully.")
+        } catch {
+            guard generation == clientGeneration, approvalActivity[id]?.state == .submitting else { return }
+            recordApproval(approval, state: .uncertain, detail: "Your decision was not confirmed. Refresh status before trying again; Cast will not resend it automatically.")
+        }
+    }
+
+    private func recordApproval(_ approval: ExecApproval, state: ActionPresentation, detail: String) {
+        approvalActivity[approval.id] = ApprovalActivity(approval: approval, state: state, detail: detail)
+        let completed = approvalActivity.values.filter { [.confirmed, .expired, .unavailable].contains($0.state) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        for old in completed.dropFirst(50) { approvalActivity[old.id] = nil }
+    }
+
+    public func dismissApprovalActivity(_ id: String) {
+        guard let entry = approvalActivity[id], [.confirmed, .expired, .unavailable].contains(entry.state) else { return }
+        approvalActivity[id] = nil
     }
 
     public func refreshApprovals() async {
@@ -2741,25 +2771,53 @@ public final class ChatStore {
         await refreshApprovals { method in try await client.request(method: method, params: [:]) }
     }
 
-    // Injectable transport for partial-failure and in-flight event regression tests.
+    // A live event invalidates a snapshot, but must not abandon previously unseen requests.
+    // Retry a bounded number of times with a fresh revision; never replay a decision.
     func refreshApprovals(request: (String) async throws -> Data) async {
         let generation = clientGeneration
-        let revision = approvalRevision
-        var replayed = approvals
-        var anyListSucceeded = false
-        for (method, kind) in [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)] {
-            guard !Task.isCancelled, generation == clientGeneration, revision == approvalRevision else { return }
-            guard let data = try? await request(method),
-                  let decoded = try? decoder.decode([ExecApproval].self, from: data) else { continue }
-            anyListSucceeded = true
-            replayed.removeAll { $0.kind == kind }
-            replayed.append(contentsOf: decoded.map { approval in
-                var tagged = approval; tagged.kind = kind; return tagged
-            })
+        for _ in 0..<3 {
+            guard !Task.isCancelled, generation == clientGeneration else { return }
+            let revision = approvalRevision
+            var replayed = approvals
+            var successfulKinds: Set<String> = []
+            for (method, kind) in [("exec.approval.list", ApprovalKind.exec), ("plugin.approval.list", .plugin)] {
+                guard !Task.isCancelled, generation == clientGeneration else { return }
+                if revision != approvalRevision { break }
+                guard let data = try? await request(method),
+                      let decoded = try? decoder.decode([ExecApproval].self, from: data) else { continue }
+                successfulKinds.insert(kind.rawValue)
+                replayed.removeAll { $0.kind == kind }
+                replayed.append(contentsOf: decoded.map { approval in
+                    var tagged = approval; tagged.kind = kind; return tagged
+                })
+            }
+            guard !Task.isCancelled, generation == clientGeneration else { return }
+            if revision != approvalRevision { continue }
+            approvalRefreshError = successfulKinds.count == 2 ? nil : "Some approval requests could not be refreshed. Previously seen requests are kept; reconnect and refresh to check for more."
+            guard !successfulKinds.isEmpty else { return }
+            for old in approvals where successfulKinds.contains(old.kind.rawValue) {
+                if old.isExpired {
+                    recordApproval(old, state: .expired, detail: "This request is no longer accepting decisions.")
+                } else if !replayed.contains(where: { $0.id == old.id }) {
+                    if approvalActivity[old.id]?.state != .confirmed {
+                        recordApproval(old, state: .unavailable, detail: "The gateway no longer lists this request. It may have expired or been handled elsewhere.")
+                    }
+                } else if approvalActivity[old.id]?.state == .uncertain {
+                    approvalActivity[old.id] = nil // Authoritative pending read permits another deliberate decision.
+                }
+            }
+            approvalRevision &+= 1
+            approvals = Self.dedupedByID(replayed.filter { !$0.isExpired })
+            return
         }
-        guard anyListSucceeded, !Task.isCancelled, generation == clientGeneration, revision == approvalRevision else { return }
-        approvalRevision &+= 1
-        approvals = Self.dedupedByID(replayed.filter { !$0.isExpired })
+        approvalRefreshError = "Requests changed while refreshing. Live updates are kept; refresh again to check for any missing requests."
+    }
+
+    public func startDownload(_ item: Deliverable) {
+        downloads.start(item) { [weak self] progress in
+            guard let self else { throw CancellationError() }
+            return try await self.fetchDeliverable(item, progress: progress)
+        }
     }
 
     private func scheduleSearch() {
@@ -2832,7 +2890,13 @@ public final class ChatStore {
         case "exec.approval.resolved", "plugin.approval.resolved":
             // Same removal for both families: another operator surface decided, so the
             // card must leave every Cast screen regardless of which kind it was.
-            if let id = event.payload?["id"]?.stringValue { approvalRevision &+= 1; self.approvals.removeAll { $0.id == id } }
+            if let id = event.payload?["id"]?.stringValue {
+                approvalRevision &+= 1
+                if let approval = approvals.first(where: { $0.id == id }) ?? approvalActivity[id]?.approval {
+                    recordApproval(approval, state: .confirmed, detail: "The gateway confirmed this request was resolved. It may have been handled on another device.")
+                }
+                approvals.removeAll { $0.id == id }
+            }
         case "cron":
             self.handleCronEvent(event)
         case "task":

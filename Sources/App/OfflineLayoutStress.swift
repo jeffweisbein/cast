@@ -82,6 +82,9 @@ struct OfflineLayoutStressView: View {
     @State private var stressTask: Task<Void, Never>?
 
     var body: some View {
+        if let mode = ProcessInfo.processInfo.environment["CAST_RELIABILITY_FIXTURE"] {
+            ReliabilityFixtureView(store: store, mode: mode)
+        } else {
         ChatView(
             store: self.store,
             layoutStrategy: self.configuration.strategy,
@@ -103,6 +106,8 @@ struct OfflineLayoutStressView: View {
                 self.stressTask?.cancel()
                 self.stressTask = nil
             }
+    }
+
     }
 
     private func runStress() async {

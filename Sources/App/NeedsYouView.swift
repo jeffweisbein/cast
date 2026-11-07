@@ -7,6 +7,7 @@ struct NeedsYouView: View {
     @State private var showingQuestions = false
     @State private var detailItem: AttentionItem?
     @State private var reviewSessionKey: String?
+    @State private var showRecent = false
 
     var body: some View {
         NavigationStack {
@@ -14,6 +15,14 @@ struct NeedsYouView: View {
                 let items = self.store.attentionItems(at: context.date)
                 List {
                     Button("Questions and question-card settings", systemImage: "questionmark.bubble") { showingQuestions = true }
+                    Picker("Requests", selection: $showRecent) {
+                        Text("Needs attention").tag(false)
+                        Text("Recent outcomes").tag(true)
+                    }.pickerStyle(.segmented)
+                    if let error = store.approvalRefreshError { Text(error).font(.caption).foregroundStyle(.secondary) }
+                    if showRecent {
+                        recentOutcomes(at: context.date)
+                    } else {
                     if items.isEmpty {
                         ContentUnavailableView("Nothing needs you right now", systemImage: "checkmark.circle",
                             description: Text("Approvals, blockers, failures, and new results will appear here."))
@@ -50,6 +59,7 @@ struct NeedsYouView: View {
                             }.padding(.vertical, 6)
                         }
                     }
+                    }
                 }
             }
             .navigationTitle("Needs you")
@@ -68,6 +78,26 @@ struct NeedsYouView: View {
         #if os(macOS)
         .frame(minWidth: 620, minHeight: 500)
         #endif
+    }
+
+    @ViewBuilder private func recentOutcomes(at now: Date) -> some View {
+        let questions = store.questionInbox.sorted.filter { !$0.request.isPending(at: now) }
+        let outcomes = store.approvalActivity.values.filter { [.confirmed, .expired, .unavailable].contains($0.state) }.sorted { $0.updatedAt > $1.updatedAt }
+        let expired = store.approvals.filter { approval in approval.isExpired && !outcomes.contains(where: { $0.id == approval.id }) }
+        if questions.isEmpty && outcomes.isEmpty && expired.isEmpty {
+            ContentUnavailableView("No recent outcomes", systemImage: "clock", description: Text("Confirmed, expired, and closed requests from this Cast session will appear here."))
+        }
+        ForEach(questions) { entry in QuestionCardView(store: store, requestID: entry.id, showsConversation: true) }
+        ForEach(outcomes) { activity in
+            VStack(alignment: .leading, spacing: 8) {
+                Label(activity.state.rawValue, systemImage: activity.state == .confirmed ? "checkmark.circle" : "clock")
+                    .font(.headline)
+                Text(activity.approval.commandText).font(.callout).textSelection(.enabled)
+                Text(activity.detail).font(.caption).foregroundStyle(.secondary)
+                Button("Dismiss") { store.dismissApprovalActivity(activity.id) }
+            }.padding(.vertical, 6)
+        }
+        ForEach(expired) { approval in ApprovalCardView(approval: approval, store: store) }
     }
 
     private func symbol(_ kind: AttentionItem.Kind) -> String {

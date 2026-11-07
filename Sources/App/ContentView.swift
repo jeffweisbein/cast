@@ -127,6 +127,7 @@ struct WorkspaceContentView: View {
     @State private var showingActivity = false
     @State private var showingNeedsYou = false
     @State private var showingDeliverables = false
+    @State private var showingDownloads = false
     @State private var showingStatus = false
     @State private var showingSearch = false
     @State private var showingTasks = false
@@ -162,6 +163,15 @@ struct WorkspaceContentView: View {
                 Button("Deliverables", systemImage: "tray.full") { self.showingDeliverables = true }
                     .buttonStyle(.plain)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.bottom, 9)
+                Button {
+                    showingDownloads = true
+                } label: {
+                    HStack {
+                        Label("Downloads", systemImage: "arrow.down.circle")
+                        if store.downloads.activeCount > 0 { Text("\(store.downloads.activeCount)").monospacedDigit() }
+                    }
+                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14).padding(.bottom, 9)
                 Divider()
                 SessionListView(store: self.store) { self.showingActivity = true }
@@ -239,6 +249,7 @@ struct WorkspaceContentView: View {
             }
         }
         #endif
+        .sheet(isPresented: $showingDownloads) { DeliverablesView(store: store, startsWithDownloads: true) }
         .sheet(isPresented: $showingSearch) { OperationsSearchView(store: store) }
         .sheet(isPresented: $showingTasks) { TasksView(store: store) }
         .sheet(isPresented: self.$showingNeedsYou) { NeedsYouView(store: self.store) }

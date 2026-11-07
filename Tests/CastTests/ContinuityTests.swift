@@ -65,6 +65,23 @@ final class ContinuityTests: XCTestCase {
         XCTAssertTrue(store.approvals.contains { $0.id == "new" })
     }
 
+    @MainActor
+    func testApprovalRefreshRetriesWhenLiveEventRacesNonemptySnapshot() async throws {
+        let store = ChatStore(transcriptCacheRoot: root(), operationsLedgerRoot: root())
+        var calls = 0
+        await store.refreshApprovals { method in
+            if method == "plugin.approval.list" { return Data("[]".utf8) }
+            calls += 1
+            if calls == 1 {
+                store.handleEvent(try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"exec.approval.requested","payload":{"id":"B","request":{"command":"B"}}}"#.utf8)))
+                return Data(#"[{"id":"A","request":{"command":"A"}}]"#.utf8)
+            }
+            return Data(#"[{"id":"A","request":{"command":"A"}},{"id":"B","request":{"command":"B"}}]"#.utf8)
+        }
+        XCTAssertEqual(Set(store.approvals.map(\.id)), ["A", "B"])
+        XCTAssertEqual(calls, 2)
+    }
+
     private func root() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))

@@ -7,10 +7,15 @@ struct ApprovalCardView: View {
     let approval: ExecApproval
     let store: ChatStore
 
+    private var activity: ApprovalActivity? { store.approvalActivity[approval.id] }
+    private var isConnected: Bool { if case .connected = store.connectionState { return true }; return false }
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+        let expired = (approval.expiresAtMs ?? .greatestFiniteMagnitude) <= context.date.timeIntervalSince1970 * 1000
+        let state = activity?.state == .confirmed ? ActionPresentation.confirmed : expired ? .expired : activity?.state ?? .waiting
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Approval needed", systemImage: "checkmark.shield.fill")
+                Label(state.rawValue, systemImage: state == .confirmed ? "checkmark.circle.fill" : "checkmark.shield.fill")
                     .font(.headline)
                     .foregroundStyle(.orange)
                 Spacer()
@@ -45,6 +50,12 @@ struct ApprovalCardView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+            if let activity { Text(activity.detail).font(.caption).foregroundStyle(.secondary) }
+            if !isConnected { Text("Reconnect to submit a decision.").font(.caption).foregroundStyle(.secondary) }
+            if state == .submitting { ProgressView("Waiting for confirmation…") }
+            if state == .uncertain {
+                Button("Refresh status") { Task { await store.refreshApprovals() } }.disabled(!isConnected)
+            }
             HStack {
                 // Plugin approvals can restrict the decision set; offering a decision the
                 // gateway will reject just turns the tap into an error alert.
@@ -59,13 +70,14 @@ struct ApprovalCardView: View {
                     Button("Allow once") { self.store.resolveApproval(id: self.approval.id, decision: "allow-once") }
                         .buttonStyle(.borderedProminent)
                 }
-            }
+            }.disabled(expired || state != .waiting || !isConnected)
         }
         .padding(14)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.orange.opacity(0.35)))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Approval needed for \(self.approval.commandText)")
+        .accessibilityLabel("\(state.rawValue) for \(self.approval.commandText)")
+        }
     }
 }
 

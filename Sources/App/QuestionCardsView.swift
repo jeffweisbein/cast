@@ -10,8 +10,8 @@ struct QuestionCardView: View {
             if let entry = store.questionInbox.entries[requestID] {
                 let pending = entry.request.isPending(at: context.date)
                 VStack(alignment: .leading, spacing: 16) {
-                    Label(pending ? "Your answer is needed" : statusLabel(entry.request.status),
-                          systemImage: pending ? "questionmark.bubble" : "checkmark.bubble")
+                    let state = ActionPresentation.question(entry, at: context.date)
+                    Label(state.rawValue, systemImage: state == .confirmed ? "checkmark.bubble" : "questionmark.bubble")
                         .font(.headline).accessibilityAddTraits(.isHeader)
                     if showsConversation {
                         Text(conversationTitle(entry.request)).font(.caption).foregroundStyle(.secondary)
