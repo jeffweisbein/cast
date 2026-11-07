@@ -1428,6 +1428,7 @@ struct Composer: View, Equatable {
                         throw VideoAttachments.ImportError.invalidVideo
                     }
                     try Task.checkCancellation()
+                    try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared + [video.attachment])
                     prepared.append(video.attachment)
                     continue
                 }
@@ -1442,6 +1443,7 @@ struct Composer: View, Equatable {
                     try AttachmentProcessor.prepareImage(data: data, fileName: name)
                 }.value
                 guard !Task.isCancelled else { return }
+                try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared + [attachment])
                 prepared.append(attachment)
             } catch {
                 guard !Task.isCancelled else { return }
