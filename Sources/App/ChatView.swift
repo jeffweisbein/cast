@@ -53,6 +53,14 @@ struct ChatView: View {
     @State private var readingWindowStartID: String?
     @State private var readingWindowEndID: String?
     @State private var focusedSearchItemID: String?
+    @State private var navigation = TranscriptNavigation()
+    @State private var topVisibleItemID: String?
+    @State private var showingFind = false
+    @State private var findQuery = ""
+    @State private var findMatches: [String] = []
+    @State private var findIndex = -1
+    @State private var navigationJumpVersion = 0
+    @State private var navigationNotice: String?
     @State private var scrollPosition = ScrollPosition()
     /// Tail the reader was on when they stopped following, so the "Latest" pill can say how
     /// much has landed since. Only reliable now that message identifiers are stable.
@@ -108,6 +116,7 @@ struct ChatView: View {
                   return false
               }) else { return }
         let itemID = items[index].id
+        rememberReadingPlace()
         // A deep search must not expand an eager Mac transcript to tens of thousands
         // of rows. Show a bounded neighborhood until the reader chooses Latest.
         if index < windowSelection.range.lowerBound { focusedSearchItemID = itemID }
@@ -115,10 +124,8 @@ struct ChatView: View {
         followState.scrollPhaseChanged(userDriven: true, isNearBottom: false)
         store.searchFocusMessageID = nil
         store.searchFocusExcerpt = nil
-        Task { @MainActor in
-            await Task.yield()
-            scrollPosition.scrollTo(id: itemID, anchor: .center)
-        }
+        jump(to: itemID)
+
     }
 
     /// Explicit jump to the tail.
@@ -129,6 +136,7 @@ struct ChatView: View {
     /// size change with no timer. What is left here is deliberate movement only — opening a
     /// session, the "Latest" pill, and the frame changes the anchor role does not observe.
     private func scrollToBottom(animated: Bool = true) {
+        navigationJumpVersion += 1
         focusedSearchItemID = nil
         // Reveal the real tail before requesting movement. If already at the frozen
         // window's bottom, no geometry callback would arrive to unpin it later.
@@ -211,6 +219,11 @@ struct ChatView: View {
         }
         ForEach(self.visibleItems) { item in
             self.itemView(item).id(item.id)
+                .overlay(alignment: .leading) {
+                    if showingFind, currentFindMatchID == item.id {
+                        RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 2).allowsHitTesting(false)
+                    }
+                }
         }
         if self.showAgentWork {
             ForEach(self.store.approvals) { approval in
@@ -240,12 +253,18 @@ struct ChatView: View {
     private var transcriptScrollBody: some View {
         ScrollView {
             self.transcriptStack
+            .scrollTargetLayout()
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
         .scrollPosition(self.$scrollPosition)
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.1) { ids in
+            let visible = Set(ids)
+            let first = visibleItems.first(where: { visible.contains($0.id) })?.id
+            if topVisibleItemID != first { topVisibleItemID = first }
+        }
         .defaultScrollAnchor(.bottom)
         // The systemic fix for late layout: async images, highlighted code blocks and
         // streamed deltas all re-anchor here with no timer of ours. Suppressed while the
@@ -257,7 +276,7 @@ struct ChatView: View {
         #if os(macOS)
         .background(TranscriptWheelObserver { scrollingUp in
             var state = self.followState
-            if !scrollingUp && self.atBottom {
+            if TranscriptNavigation.shouldResumeForWheel(scrollingUp: scrollingUp, atBottom: atBottom, focused: focusedSearchItemID != nil) {
                 state.resume()
             } else {
                 state.scrollPhaseChanged(userDriven: true, isNearBottom: false)
@@ -526,7 +545,17 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
         .sheet(isPresented: $showingSecretRequests) { SecretRequestsView(store: store) }
+        .onChange(of: showingFind) { _, _ in refreshFindMatches() }
+        .onChange(of: store.transcriptRevision) { _, _ in refreshFindMatches() }
+        .onChange(of: showAgentWork) { _, _ in refreshFindMatches() }
+        .onChange(of: store.selectedSessionKey) { _, _ in
+            navigation.reset(); navigationJumpVersion += 1; topVisibleItemID = nil; findQuery = ""; findIndex = -1
+            showingFind = false; findMatches = []; navigationNotice = nil
+        }
         .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+            ConnectionStatusView(store: store)
+            navigationControls
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
                 if !pending.isEmpty {
@@ -541,7 +570,7 @@ struct ChatView: View {
 
             if focusedSearchItemID != nil {
                 HStack {
-                    Text("Showing an older search match").font(.caption)
+                    Text("Viewing another part of the conversation").font(.caption)
                     Spacer()
                     Button("Latest") { focusedSearchItemID = nil; followState.resume(); scrollToBottom() }
                 }.padding(10).background(.regularMaterial)
@@ -564,6 +593,8 @@ struct ChatView: View {
                     self.store.retryHistoryNow()
                 }
             }
+            }
+            .background(Theme.canvas)
         }
         .navigationTitle(self.title)
         #if os(iOS)
@@ -603,6 +634,84 @@ struct ChatView: View {
         .sheet(item: self.$documentLink) { link in
             DocumentLinkView(link: link, store: self.store)
         }
+    }
+
+    private var currentFindMatchID: String? { findMatches.indices.contains(findIndex) ? findMatches[findIndex] : nil }
+    private func refreshFindMatches() {
+        let previous = currentFindMatchID
+        findMatches = showingFind ? TranscriptNavigation.matches(items, query: findQuery) : []
+        findIndex = previous.flatMap { findMatches.firstIndex(of: $0) } ?? -1
+    }
+
+    private func rememberReadingPlace() {
+        navigation.remember(followState.followsLatest ? .latest : .item(topVisibleItemID ?? visibleItems.first?.id ?? "streaming"))
+    }
+    private func jump(to id: String) {
+        navigationJumpVersion += 1
+        let version = navigationJumpVersion
+        let session = store.selectedSessionKey
+        navigationNotice = nil
+        if id == "streaming" {
+            focusedSearchItemID = nil; readingWindowStartID = nil; readingWindowEndID = nil; transcriptWindow.reset()
+        } else if items.contains(where: { $0.id == id }) {
+            focusedSearchItemID = id
+        } else { navigationNotice = "That reading place is no longer in the loaded conversation."; return }
+        followState.scrollPhaseChanged(userDriven: true, isNearBottom: false)
+        nearBottom = false; atBottom = false
+        Task { @MainActor in
+            await Task.yield()
+            guard session == store.selectedSessionKey, version == navigationJumpVersion else { return }
+            scrollPosition.scrollTo(id: id, anchor: .top)
+        }
+    }
+    private func find(_ offset: Int) {
+        let matches = findMatches
+        guard !matches.isEmpty else { return }
+        rememberReadingPlace()
+        findIndex = findIndex < 0 ? (offset < 0 ? matches.count - 1 : 0) : (findIndex + offset + matches.count) % matches.count
+        jump(to: matches[findIndex])
+    }
+    @ViewBuilder private var navigationControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Menu {
+                    Button("Latest reply", systemImage: "bubble.left") {
+                        if let id = TranscriptNavigation.latestReply(items) { rememberReadingPlace(); jump(to: id) }
+                    }.disabled(TranscriptNavigation.latestReply(items) == nil)
+                    Button("Active work", systemImage: "waveform.path.ecg") {
+                        rememberReadingPlace(); showAgentWork = true; jump(to: "streaming")
+                    }.disabled(!store.isAgentTurnActive)
+                    Button("Latest", systemImage: "arrow.down.to.line") {
+                        rememberReadingPlace(); followState.resume(); scrollToBottom()
+                    }
+                } label: { Label("Jump to", systemImage: "arrow.up.arrow.down") }
+                Button("Find", systemImage: "magnifyingglass") { showingFind.toggle() }
+                    .keyboardShortcut("f", modifiers: .command)
+                Spacer()
+                if navigation.returnPlace != nil {
+                    Button("Back to reading", systemImage: "arrow.uturn.backward") {
+                        switch navigation.takeReturn() {
+                        case .latest: followState.resume(); scrollToBottom()
+                        case .item(let id): jump(to: id)
+                        case nil: break
+                        }
+                    }
+                }
+            }.font(.caption).buttonStyle(.borderless)
+            if showingFind {
+                HStack {
+                    TextField("Find in loaded conversation", text: $findQuery)
+                        .textFieldStyle(.roundedBorder).onSubmit { find(1) }
+                        .onChange(of: findQuery) { _, _ in findIndex = -1; refreshFindMatches() }
+                    Text(findQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 ? "2+ characters" : findMatches.isEmpty ? "No matches" : findIndex < 0 ? "\(findMatches.count) matches" : "\(min(findIndex + 1, findMatches.count))/\(findMatches.count)\(findMatches.count == 200 ? "+" : "")")
+                        .font(.caption).monospacedDigit()
+                    Button("Previous match", systemImage: "chevron.up") { find(-1) }.labelStyle(.iconOnly).disabled(findMatches.isEmpty)
+                    Button("Next match", systemImage: "chevron.down") { find(1) }.labelStyle(.iconOnly).disabled(findMatches.isEmpty)
+                }
+                Text("Searches loaded message groups. Use workspace Search for older history.").font(.caption2).foregroundStyle(.secondary)
+            }
+            if let navigationNotice { Text(navigationNotice).font(.caption).foregroundStyle(.secondary) }
+        }.padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial)
     }
 
     @ViewBuilder
@@ -803,6 +912,7 @@ struct Composer: View, Equatable {
     private let storeIdentity: ObjectIdentifier
     @State private var draft = ""
     @State private var importing = false
+    @State private var importTarget: ChatStore.AttachmentDraftTarget?
     @State private var confirmingDelivery = false
     @State private var dropTargeted = false
     @StateObject private var voiceRecorder = VoiceRecorderController()
@@ -974,8 +1084,11 @@ struct Composer: View, Equatable {
             allowedContentTypes: [.image, .pdf, .plainText, .data],
             allowsMultipleSelection: true)
         { result in
-            if case let .success(urls) = result { for url in urls { self.store.addAttachment(url: url) } }
-            else if case let .failure(error) = result { self.store.clearError(); _ = error }
+            let target = self.importTarget
+            self.importTarget = nil
+            if case let .success(urls) = result, let target {
+                for url in urls { self.store.addAttachment(url: url, target: target) }
+            } else if case let .failure(error) = result { self.store.showError(error.localizedDescription) }
         }
         .confirmationDialog(
             "Deliver this reply through the session's external channel?",
@@ -1113,7 +1226,7 @@ struct Composer: View, Equatable {
                 self.showingPhotos = true
             }
             Button("Files", systemImage: "folder") {
-                self.importing = true
+                self.importTarget = self.store.attachmentDraftTarget; self.importing = true
             }
         } label: {
             Image(systemName: "paperclip")
@@ -1126,7 +1239,7 @@ struct Composer: View, Equatable {
         .padding(.vertical, 4)
         .accessibilityLabel("Attach photo or file")
         #else
-        Button { self.importing = true } label: {
+        Button { self.importTarget = self.store.attachmentDraftTarget; self.importing = true } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -1377,19 +1490,20 @@ struct Composer: View, Equatable {
     #endif
 
     private func importDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        let target = self.store.attachmentDraftTarget
         var handled = false
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 handled = true
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
                     guard let url else { return }
-                    Task { @MainActor in self.store.addAttachment(url: url) }
+                    Task { @MainActor in self.store.addAttachment(url: url, target: target) }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 handled = true
                 provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                     guard let data else { return }
-                    Task { @MainActor in self.store.addAttachment(imageData: data, fileName: "Dropped Image") }
+                    Task { @MainActor in self.store.addAttachment(imageData: data, fileName: "Dropped Image", target: target) }
                 }
             }
         }

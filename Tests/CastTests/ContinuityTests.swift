@@ -3,6 +3,85 @@ import XCTest
 @testable import Cast
 
 final class ContinuityTests: XCTestCase {
+    @MainActor
+    func testOldConnectionCannotReplaceSidebarAfterSuspension() async {
+        let store = ChatStore(transcriptCacheRoot: root(), operationsLedgerRoot: root())
+        await store.refreshSessions {
+            store.suspendForBackground()
+            return Data(#"{"sessions":[{"key":"old-gateway-session","label":"Stale"}]}"#.utf8)
+        }
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertNil(store.selectedSessionKey)
+    }
+
+    func testOutboxCannotOverwriteAnIdempotencyKeysOriginalPayload() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outbox = SendOutbox(root: directory)
+        let original = StoredSend(sessionKey: "a", idempotencyKey: "same", context: PendingSendContext(text: "original", attachments: [], deliver: false), createdAt: Date())
+        try await outbox.save(original)
+        try await outbox.save(original) // An identical retry is allowed.
+        let changed = StoredSend(sessionKey: "b", idempotencyKey: "same", context: PendingSendContext(text: "changed", attachments: [], deliver: true), createdAt: Date())
+        do { try await outbox.save(changed); XCTFail("Overwrote an existing send's identity") } catch {}
+        let retained = try await outbox.load("same", sessionKey: "a")
+        XCTAssertEqual(retained.context.text, "original")
+        XCTAssertFalse(retained.context.deliver)
+    }
+
+    @MainActor
+    func testComposerFilesStayWithTheirOriginalConversation() {
+        let store = ChatStore(transcriptCacheRoot: root(), operationsLedgerRoot: root())
+        store.selectedSessionKey = "a"
+        let attachment = PreparedAttachment(type: "file", mimeType: "text/plain", fileName: "private.txt", data: Data("a".utf8))
+        store.addAttachments([attachment])
+        store.selectedSessionKey = "b"
+        XCTAssertTrue(store.pendingAttachments.isEmpty)
+        store.selectedSessionKey = "a"
+        XCTAssertEqual(store.pendingAttachments, [attachment])
+        let target = store.attachmentDraftTarget
+        store.selectedSessionKey = "b"
+        store.finishAttachmentPreparation(.success(attachment), target: target)
+        XCTAssertTrue(store.pendingAttachments.isEmpty)
+        store.selectedSessionKey = "a"
+        XCTAssertEqual(store.pendingAttachments.count, 2)
+    }
+
+    @MainActor
+    func testPartialApprovalRefreshKeepsFailedFamilyAndLiveEvents() async throws {
+        let store = ChatStore(transcriptCacheRoot: root(), operationsLedgerRoot: root())
+        func event(_ name: String, _ id: String) throws -> EventFrame {
+            try JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: ["type":"event", "event":name, "payload":["id":id,"request":["command":"echo test"]]]))
+        }
+        store.handleEvent(try event("plugin.approval.requested", "keep"))
+        await store.refreshApprovals { method in
+            if method == "plugin.approval.list" { throw URLError(.notConnectedToInternet) }
+            return Data("[]".utf8)
+        }
+        XCTAssertEqual(store.approvals.map(\.id), ["keep"])
+        await store.refreshApprovals { _ in
+            store.handleEvent(try event("exec.approval.requested", "new"))
+            return Data("[]".utf8)
+        }
+        XCTAssertTrue(store.approvals.contains { $0.id == "new" })
+    }
+
+    @MainActor
+    func testApprovalRefreshRetriesWhenLiveEventRacesNonemptySnapshot() async throws {
+        let store = ChatStore(transcriptCacheRoot: root(), operationsLedgerRoot: root())
+        var calls = 0
+        await store.refreshApprovals { method in
+            if method == "plugin.approval.list" { return Data("[]".utf8) }
+            calls += 1
+            if calls == 1 {
+                store.handleEvent(try JSONDecoder().decode(EventFrame.self, from: Data(#"{"type":"event","event":"exec.approval.requested","payload":{"id":"B","request":{"command":"B"}}}"#.utf8)))
+                return Data(#"[{"id":"A","request":{"command":"A"}}]"#.utf8)
+            }
+            return Data(#"[{"id":"A","request":{"command":"A"}},{"id":"B","request":{"command":"B"}}]"#.utf8)
+        }
+        XCTAssertEqual(Set(store.approvals.map(\.id)), ["A", "B"])
+        XCTAssertEqual(calls, 2)
+    }
+
     private func root() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))

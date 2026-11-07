@@ -64,10 +64,14 @@ public enum AttachmentProcessor {
     {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw AttachmentError.unreadable }
         let type = typeIdentifier.flatMap(UTType.init)
             ?? (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
             ?? UTType(filenameExtension: url.pathExtension)
+        if type?.conforms(to: .image) != true,
+           let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileBytes {
+            throw AttachmentError.fileTooLarge(size)
+        }
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw AttachmentError.unreadable }
         let fileName = originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = fileName.flatMap { $0.isEmpty ? nil : $0 } ?? url.lastPathComponent
         if type?.conforms(to: .image) == true {
@@ -87,9 +91,27 @@ public enum AttachmentProcessor {
     }
 
     public static func validateFrame(message: String, attachments: [PreparedAttachment]) throws {
-        // Base64 expands by roughly 4/3; leave 1 MB for framing and gateway metadata.
-        let estimated = message.utf8.count + attachments.reduce(0) { $0 + (($1.data.count + 2) / 3) * 4 + 512 }
-        guard estimated <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(estimated) }
+        let encodedSize = try frameByteCount(message: message, attachments: attachments)
+        guard encodedSize <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(encodedSize) }
+    }
+
+    // Count the exact JSON payload without constructing base64 on the UI actor.
+    // The gateway encoder uses withoutEscapingSlashes, so base64 has no JSON escapes.
+    static func frameByteCount(message: String, attachments: [PreparedAttachment]) throws -> Int {
+        let metadata: [[String: String]] = attachments.map {
+            ["type": $0.type, "mimeType": $0.mimeType, "fileName": $0.fileName, "content": ""]
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
+        let envelope = AnyCodable(["message": "", "attachments": metadata] as [String: Any?])
+        var size = try encoder.encode(envelope).count
+        for byte in message.utf8 {
+            switch byte {
+            case 8, 9, 10, 12, 13, 34, 92: size += 2
+            case 0..<32: size += 6
+            default: size += 1
+            }
+        }
+        return size + attachments.reduce(0) { $0 + (($1.data.count + 2) / 3) * 4 }
     }
 
     static func compressImage(_ input: Data, targetBytes: Int = inlineImageTargetBytes) throws -> Data {
