@@ -2488,19 +2488,31 @@ public final class ChatStore {
         catch { self.showError("Couldn’t save review status. Please try again.") }
     }
 
-    public func localDeliverableURL(_ item: Deliverable) -> URL? {
-        if let cached = self.deliverableFiles.existing(item) { return cached }
-        // A remote path matching a local filename does not prove they are the same file.
-        guard ["localhost", "127.0.0.1", "::1"].contains(self.profile.gatewayURL.host ?? "") else { return nil }
-        guard item.target.hasPrefix("/") || item.target.hasPrefix("file://") else { return nil }
-        let url = MediaThumbnailLoader.resolvedFileURL(for: item.target)
-        guard FileManager.default.isReadableFile(atPath: url.path) else { return nil }
-        return url
+    public func localDeliverableURL(_ item: Deliverable) async -> URL? {
+        let generation = clientGeneration
+        let gatewayURL = profile.gatewayURL
+        let fileCache = deliverableFiles.scoped(to: gatewayURL)
+        let result = await Task.detached(priority: .utility) { () -> URL? in
+            if let cached = fileCache.existing(item) { return cached }
+            // A remote path matching a local filename does not prove they are the same file.
+            guard ["localhost", "127.0.0.1", "::1"].contains(gatewayURL.host ?? ""),
+                  item.target.hasPrefix("/") || item.target.hasPrefix("file://") else { return nil }
+            let url = MediaThumbnailLoader.resolvedFileURL(for: item.target)
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true, let size = values.fileSize,
+                  (try? ArtifactTransferPolicy.validateSize(size, expected: item.sizeBytes)) != nil,
+                  FileManager.default.isReadableFile(atPath: url.path) else { return nil }
+            return url
+        }.value
+        guard !Task.isCancelled, generation == clientGeneration else { return nil }
+        return result
     }
 
     public func refreshArtifacts(sessionKey: String) async throws {
         guard gatewayMethods.contains("artifacts.list"), let client, case .connected = connectionState else { return }
+        let generation = clientGeneration
         let data = try await client.request(method: "artifacts.list", params: ["sessionKey": sessionKey])
+        try assertTransferCurrent(generation)
         struct Response: Decodable { let artifacts: [GatewayArtifact] }
         let artifacts = try decoder.decode(Response.self, from: data).artifacts
         var ledger = deliverableLedger
@@ -2511,42 +2523,49 @@ public final class ChatStore {
 
     public func fetchDeliverable(_ item: Deliverable,
         progress: @escaping @Sendable (Int, Int?) async -> Void = { _, _ in }) async throws -> URL {
-        if let existing = localDeliverableURL(item) { return existing }
+        try Task.checkCancellation()
+        let generation = clientGeneration
+        let gatewayURL = profile.gatewayURL
+        let existing = await localDeliverableURL(item)
+        try assertTransferCurrent(generation)
+        if let existing { return existing }
         guard let client, case .connected = connectionState else { throw ModelControlError.disconnected }
         let bytes: Data
         if let id = item.artifactID {
             guard gatewayMethods.contains("artifacts.download") else { throw ArtifactTransferError.unavailable }
             let data = try await client.request(method: "artifacts.download", params: ["sessionKey": item.sessionKey, "artifactId": id], timeoutMs: 60000)
+            try assertTransferCurrent(generation)
             let response = try decoder.decode(AnyCodable.self, from: data)
             guard response["artifact"]?["id"]?.stringValue == id else { throw ArtifactTransferError.invalid }
             if let key = response["artifact"]?["sessionKey"]?.stringValue,
                !SessionKeyMatcher.matches(key, item.sessionKey) { throw ArtifactTransferError.invalid }
+            let expectedSize = try ArtifactTransferPolicy.downloadSize(response, listedSize: item.sizeBytes)
             if response["data"]?.stringValue != nil {
-                bytes = try ArtifactTransferPolicy.bytes(response, expectedSize: item.sizeBytes)
+                bytes = try ArtifactTransferPolicy.bytes(response, expectedSize: expectedSize)
             } else if let raw = response["url"]?.stringValue {
                 bytes = try await ArtifactDownloader.download(
-                    url: ArtifactTransferPolicy.url(raw, gateway: profile.gatewayURL), expectedSize: item.sizeBytes, progress: progress)
+                    url: ArtifactTransferPolicy.url(raw, gateway: gatewayURL), expectedSize: expectedSize, progress: progress)
             } else { throw ArtifactTransferError.unavailable }
         } else {
             guard gatewayMethods.contains("sessions.files.get") else { throw ArtifactTransferError.unavailable }
             let path = item.target.hasPrefix("file://") ? URL(string: item.target)?.path ?? item.target : item.target
             let data = try await client.request(method: "sessions.files.get", params: ["sessionKey": item.sessionKey, "path": path])
+            try assertTransferCurrent(generation)
             let response = try decoder.decode(AnyCodable.self, from: data)
-            guard response["file"]?["missing"]?.boolValue != true,
-                  response["file"]?["previewKind"]?.stringValue != "unsupported",
-                  let content = response["file"]?["content"]?.stringValue else {
-                throw NSError(domain: "Cast", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                    "This is a gateway file link, not a downloadable attachment. Ask the agent to attach the file to this conversation."])
-            }
-            let encoding = response["file"]?["contentEncoding"]?.stringValue ?? "utf8"
-            guard let decoded = encoding == "base64" ? Data(base64Encoded: content) : (encoding == "utf8" ? Data(content.utf8) : nil)
-            else { throw ArtifactTransferError.invalid }
-            try ArtifactTransferPolicy.validateSize(decoded.count, expected: response["file"]?["size"]?.intValue)
-            bytes = decoded
+            if let key = response["sessionKey"]?.stringValue,
+               !SessionKeyMatcher.matches(key, item.sessionKey) { throw ArtifactTransferError.invalid }
+            bytes = try ArtifactTransferPolicy.fileBytes(response)
         }
+        try assertTransferCurrent(generation)
+        let fileCache = self.deliverableFiles.scoped(to: gatewayURL)
+        let url = try await Task.detached(priority: .utility) { try fileCache.save(bytes, for: item) }.value
+        try assertTransferCurrent(generation)
+        return url
+    }
+
+    private func assertTransferCurrent(_ generation: Int) throws {
         try Task.checkCancellation()
-        let fileCache = self.deliverableFiles
-        return try await Task.detached(priority: .utility) { try fileCache.save(bytes, for: item) }.value
+        guard generation == clientGeneration else { throw ArtifactTransferError.connectionChanged }
     }
 
     func cachedSearch(_ query: String) async -> [CachedSearchHit] {

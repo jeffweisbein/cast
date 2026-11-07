@@ -104,7 +104,7 @@ private struct DeliverableRow: View {
             if let error = self.error { Text(error).font(.caption).foregroundStyle(.red) }
         }
         .padding(.vertical, 6)
-        .task(id: self.item.reviewID) { self.cachedURL = self.store.localDeliverableURL(self.item) }
+        .task(id: self.item.reviewID) { self.cachedURL = await self.store.localDeliverableURL(self.item) }
         .quickLookPreview(self.$previewURL)
         .onDisappear { downloadTask?.cancel() }
         .fileExporter(isPresented: $exporting, document: cachedURL.map { DownloadExport(url: $0) },

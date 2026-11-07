@@ -64,10 +64,14 @@ public enum AttachmentProcessor {
     {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw AttachmentError.unreadable }
         let type = typeIdentifier.flatMap(UTType.init)
             ?? (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
             ?? UTType(filenameExtension: url.pathExtension)
+        if type?.conforms(to: .image) != true,
+           let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileBytes {
+            throw AttachmentError.fileTooLarge(size)
+        }
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw AttachmentError.unreadable }
         let fileName = originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = fileName.flatMap { $0.isEmpty ? nil : $0 } ?? url.lastPathComponent
         if type?.conforms(to: .image) == true {
@@ -87,9 +91,11 @@ public enum AttachmentProcessor {
     }
 
     public static func validateFrame(message: String, attachments: [PreparedAttachment]) throws {
-        // Base64 expands by roughly 4/3; leave 1 MB for framing and gateway metadata.
-        let estimated = message.utf8.count + attachments.reduce(0) { $0 + (($1.data.count + 2) / 3) * 4 + 512 }
-        guard estimated <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(estimated) }
+        // Match the gateway client's JSONEncoder, including quotes, control characters,
+        // filenames and escaped base64 slashes. Leave 1 MB for request metadata.
+        let payload = AnyCodable(["message": message, "attachments": attachments.map(\.rpcValue)] as [String: Any?])
+        let encodedSize = try JSONEncoder().encode(payload).count
+        guard encodedSize <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(encodedSize) }
     }
 
     static func compressImage(_ input: Data, targetBytes: Int = inlineImageTargetBytes) throws -> Data {

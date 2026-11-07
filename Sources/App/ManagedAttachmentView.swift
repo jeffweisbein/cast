@@ -11,6 +11,8 @@ struct ManagedAttachmentView: View {
     @State private var error: String?
     @State private var attempt = 0
 
+    private struct LoadID: Equatable { let attachment: ManagedChatAttachment; let attempt: Int }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let localURL {
@@ -31,19 +33,21 @@ struct ManagedAttachmentView: View {
                 ProgressView("Loading \(attachment.label)…")
             }
         }
-        .task(id: "\(attachment.id):\(attempt)") {
-            error = nil
+        .task(id: LoadID(attachment: attachment, attempt: attempt)) {
+            error = nil; localURL = nil; image = nil
             do {
                 guard let download else { throw ArtifactTransferError.unavailable }
                 let url = try await download(attachment)
                 try Task.checkCancellation()
                 localURL = url
                 if attachment.mimeType?.hasPrefix("image/") == true {
-                    image = await MediaThumbnailLoader.shared.thumbnail(for:
+                    let thumbnail = await MediaThumbnailLoader.shared.thumbnail(for:
                         MediaItem(id: url.path, path: url.path, mimeType: attachment.mimeType, date: nil), maxPixel: 640)
+                    try Task.checkCancellation()
+                    image = thumbnail
                 }
             } catch is CancellationError { }
-            catch { self.error = error.localizedDescription }
+            catch { if !Task.isCancelled { self.error = error.localizedDescription } }
         }
     }
 }
