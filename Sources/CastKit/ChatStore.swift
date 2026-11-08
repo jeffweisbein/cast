@@ -3556,9 +3556,21 @@ public final class ChatStore {
               payload["state"]?.stringValue == "final",
               payload["yielded"]?.boolValue != true,
               payload["transcriptOnly"]?.boolValue != true,
+              payload["replay"]?.boolValue != true,
+              payload["replayed"]?.boolValue != true,
               let runID = payload["runId"]?.stringValue, !runID.isEmpty,
               let sessionKey = payload["sessionKey"]?.stringValue, !sessionKey.isEmpty
         else { return }
+        let normalizedKey = sessionKey.lowercased()
+        guard !normalizedKey.contains(":cron:"),
+              !(normalizedKey.split(separator: ":").last?.hasPrefix("dreaming-") ?? false),
+              !normalizedKey.contains(":incognito-") else { return }
+        if let message = payload["message"], message["role"]?.stringValue == "assistant" {
+            let artifactModel = ["delivery-mirror", "gateway-injected"].contains(message["model"]?.stringValue ?? "")
+            let mirror = ["channel-final", "channel-final-suppressed", "message-tool-source-reply", "cron-direct-delivery-context"]
+                .contains(message["openclawDeliveryMirror"]?["kind"]?.stringValue ?? "")
+            guard !(message["provider"]?.stringValue == "openclaw" && artifactModel), !mirror else { return }
+        }
         // A ready iOS registration owns delivery through APNs. The foreground delegate
         // applies this same ledger and visibility policy, avoiding a second local banner.
         if self.remotePushReady { return }

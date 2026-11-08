@@ -66,6 +66,28 @@ final class TaskCompletionNotificationTests: XCTestCase {
         XCTAssertTrue(store.notificationRecords.isEmpty)
     }
 
+    @MainActor
+    func testReplayMirrorsAndAutomationsDoNotNotify() throws {
+        let (store, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for key in ["agent:main:cron:daily", "agent:main:dreaming-nightly", "agent:main:subagent:incognito-abc"] {
+            store.handleEvent(try taskCompletionEvent(sessionKey: key))
+        }
+        let ignored: [[String: Any]] = [
+            ["replay": true], ["replayed": true],
+            ["message": ["role": "assistant", "provider": "openclaw", "model": "delivery-mirror"]],
+            ["message": ["role": "assistant", "provider": "openclaw", "model": "gateway-injected"]],
+            ["message": ["role": "assistant", "openclawDeliveryMirror": ["kind": "channel-final"]]],
+        ]
+        for extra in ignored {
+            let payload: [String: Any] = ["sessionKey": "agent:main:task", "runId": UUID().uuidString, "state": "final"]
+                .merging(extra) { _, next in next }
+            store.handleEvent(try JSONDecoder().decode(EventFrame.self,
+                from: JSONSerialization.data(withJSONObject: ["event": "chat", "payload": payload])))
+        }
+        XCTAssertTrue(store.notificationRecords.isEmpty)
+    }
+
     func testDestinationRejectsMalformedAndUnrelatedRemotePayloads() {
         XCTAssertNil(NativeNotificationDestination(userInfo: ["workspaceID": "w"]))
         XCTAssertNil(NativeNotificationDestination(userInfo: ["workspaceID": "w", "sessionKey": "x\n"]))
