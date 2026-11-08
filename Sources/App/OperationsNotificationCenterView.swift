@@ -25,6 +25,11 @@ struct OperationsNotificationCenterView: View {
                     Toggle("Notify me when tasks finish", isOn: Binding(
                         get: { self.store.remotePushEnabled },
                         set: { enabled in Task { await self.store.setRemotePushEnabled(enabled) } }))
+                    if self.store.remotePushManagedElsewhere {
+                        Button("Use this workspace for task alerts") {
+                            Task { await self.store.setRemotePushEnabled(true) }
+                        }
+                    }
                     Text(self.store.remotePushStatus)
                         .font(.caption).foregroundStyle(.secondary)
                     #else

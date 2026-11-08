@@ -128,6 +128,31 @@ final class TaskCompletionNotificationTests: XCTestCase {
         XCTAssertEqual(store.notificationRecords.first?.transitions.last?.detail, "remote-notification")
     }
 
+    @MainActor
+    func testRemoteDeliveryDoesNotFallBackLocallyDuringSyncOrBackgroundTransition() throws {
+        let (store, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        store.usesRemoteCompletionDelivery = true
+        XCTAssertFalse(store.remotePushReady)
+        store.isNotificationContextVisible = false
+        store.handleEvent(try taskCompletionEvent(sessionKey: "agent:main:task", runID: "pending-sync"))
+        XCTAssertTrue(store.notificationRecords.isEmpty)
+        let bindingKey = "cast.push.binding.\(store.profile.id)"
+        defer { UserDefaults.standard.removeObject(forKey: bindingKey) }
+        UserDefaults.standard.set(["url": store.profile.gatewayURL.absoluteString, "gatewayDeviceID": "g"], forKey: bindingKey)
+        let destination = try XCTUnwrap(NativeNotificationDestination(userInfo: ["openclaw": ["kind": "task.completed", "workspaceId": store.profile.id, "sessionKey": "agent:main:task", "runId": "pending-sync", "gatewayDeviceId": "g"]]))
+        XCTAssertTrue(store.observeRemoteCompletion(destination, presenting: false))
+        store.handleEvent(try taskCompletionEvent(sessionKey: "agent:main:task", runID: "pending-sync"))
+        XCTAssertEqual(store.notificationRecords.count, 1)
+    }
+
+    func testAliasStatusNamesTheActualOwnerInsteadOfClaimingReady() throws {
+        let data = Data(#"{"registered":true,"enabled":true,"configured":true,"gatewayDeviceId":"g","workspaceId":"owner"}"#.utf8)
+        let status = try JSONDecoder().decode(NativePushStatus.self, from: data)
+        XCTAssertFalse(status.isManagedElsewhere(workspaceID: "owner"))
+        XCTAssertTrue(status.isManagedElsewhere(workspaceID: "alias"))
+    }
+
     func testPushEnvironmentMustMatchExplicitSignedBuildSetting() {
         XCTAssertEqual(NativePushEnvironment.resolve("development"), "sandbox")
         XCTAssertEqual(NativePushEnvironment.resolve("production"), "production")

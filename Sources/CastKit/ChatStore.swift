@@ -422,6 +422,10 @@ public final class ChatStore {
     public var isNotificationContextVisible = true
     public private(set) var remotePushEnabled = false
     public private(set) var remotePushReady = false
+    public private(set) var remotePushManagedElsewhere = false
+    @ObservationIgnored private var remotePushTakeoverRequested = false
+    // Transport ownership is stable; sync/readiness failures never enable a second sender.
+    @ObservationIgnored var usesRemoteCompletionDelivery = NativePushEnvironment.usesAPNs
     public private(set) var remotePushStatus = "Remote notifications are off."
     @ObservationIgnored private var remotePushSyncTask: Task<Void, Never>?
     @ObservationIgnored private var remotePushRevision = 0
@@ -3571,9 +3575,9 @@ public final class ChatStore {
                 .contains(message["openclawDeliveryMirror"]?["kind"]?.stringValue ?? "")
             guard !(message["provider"]?.stringValue == "openclaw" && artifactModel), !mirror else { return }
         }
-        // A ready iOS registration owns delivery through APNs. The foreground delegate
-        // applies this same ledger and visibility policy, avoiding a second local banner.
-        if self.remotePushReady { return }
+        // iOS always assigns delivery to APNs, including while registration/status
+        // sync is pending. A transient failure cannot open a competing local sender.
+        if self.usesRemoteCompletionDelivery { return }
         let eventID = "completion:\(runID)"
         let dedupeID = "\(self.profile.id):\(eventID)"
         let now = Date()
@@ -3713,6 +3717,7 @@ public final class ChatStore {
         }
         guard revision == self.remotePushOptInRevision else { return }
         self.remotePushEnabled = enabled
+        self.remotePushTakeoverRequested = enabled
         if !enabled { self.remotePushReady = false }
         UserDefaults.standard.set(enabled, forKey: "cast.push.enabled.\(self.profile.id)")
         if enabled { await NativePushRegistration.shared.registerIfAuthorized() }
@@ -3775,6 +3780,8 @@ public final class ChatStore {
 
     private func syncRemotePush() async {
         self.remotePushReady = false
+        let takeover = self.remotePushTakeoverRequested
+        self.remotePushTakeoverRequested = false
         guard let client = self.client, case .connected = self.connectionState else {
             self.remotePushStatus = self.remotePushEnabled ? "Waiting for a connection to enable alerts." : "Notifications are off here. Reconnect to stop any remote alerts."
             return
@@ -3784,13 +3791,22 @@ public final class ChatStore {
             return
         }
         do {
+            let generation = self.clientGeneration
+            let initialData = try await client.request(method: "push.native.status", params: [:])
+            let initial = try self.decoder.decode(NativePushStatus.self, from: initialData)
+            guard generation == self.clientGeneration else { return }
+            self.remotePushManagedElsewhere = initial.isManagedElsewhere(workspaceID: self.profile.id)
+            if self.remotePushManagedElsewhere && !(takeover && self.remotePushEnabled) {
+                self.remotePushStatus = "Task alerts are managed by another workspace on this device."
+                return
+            }
             if !self.remotePushEnabled {
-                _ = try await client.request(method: "push.native.unregister", params: [:])
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
                 self.remotePushStatus = "Remote notifications are off."
                 return
             }
             guard await NativeNotificationDelivery.shared.isAuthorized() else {
-                _ = try await client.request(method: "push.native.unregister", params: [:])
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
                 self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
                 return
             }
@@ -3802,15 +3818,18 @@ public final class ChatStore {
             }
             let excluded = Set(self.mutedSessionKeys).union(self.sidebarPreferences.hiddenKeys).sorted()
             guard excluded.count <= 1000 else {
-                _ = try await client.request(method: "push.native.unregister", params: [:])
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
                 self.remotePushStatus = "Too many muted chats to safely enable remote notifications."
                 return
             }
-            let generation = self.clientGeneration
-            let registeredData = try await client.request(method: "push.native.register", params: [
+            var parameters: [String: Any] = [
                 "token": token, "topic": topic, "environment": environment,
                 "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
-            ])
+            ]
+            if takeover, let previous = initial.workspaceId, previous != self.profile.id {
+                parameters["replaceWorkspaceId"] = previous
+            }
+            let registeredData = try await client.request(method: "push.native.register", params: parameters)
             let registered = try self.decoder.decode(NativePushRegistrationResult.self, from: registeredData)
             guard generation == self.clientGeneration else { return }
             if registered.registered {
@@ -3828,8 +3847,11 @@ public final class ChatStore {
                 "url": self.profile.gatewayURL.absoluteString,
                 "gatewayDeviceID": status.gatewayDeviceId,
             ], forKey: self.remotePushBindingKey)
-            self.remotePushReady = status.registered && status.enabled && status.configured
-            self.remotePushStatus = self.remotePushReady
+            self.remotePushManagedElsewhere = status.isManagedElsewhere(workspaceID: self.profile.id)
+            self.remotePushReady = status.registered && status.workspaceId == self.profile.id && status.enabled && status.configured
+            self.remotePushStatus = self.remotePushManagedElsewhere
+                ? "Task alerts are managed by another workspace on this device."
+                : self.remotePushReady
                 ? "Task alerts are ready, even when Cast is closed."
                 : "This workspace still needs notification delivery configured."
         } catch {
