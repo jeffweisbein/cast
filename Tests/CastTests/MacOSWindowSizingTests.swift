@@ -32,8 +32,8 @@ final class MacOSWindowSizingTests: XCTestCase {
             credential: GatewayCredential(kind: .deviceToken, token: "unused"),
             deviceCredentialProvider: { nil }, onDeviceToken: { _ in }, clientId: "cast-tests",
             platform: "macOS", deviceFamily: "Mac", displayName: "Cast Tests")
-        // Never start this client: real local echo/composer reset runs, while transport
-        // fails immediately without opening a socket or looking up credentials.
+        // Exercise the real local echo/composer reset; sendChat attempts only this
+        // unreachable loopback endpoint, with an inert credential (never a live gateway).
         store.installClientForTesting(GatewayClient(config: config, onEvent: { _ in }, onState: { _ in }))
         let sidebar = WindowSizingSidebar()
         let host = NSHostingView(rootView: WindowSizingFixture(store: store, sidebar: sidebar))
