@@ -3807,10 +3807,20 @@ public final class ChatStore {
                 return
             }
             let generation = self.clientGeneration
-            _ = try await client.request(method: "push.native.register", params: [
+            let registeredData = try await client.request(method: "push.native.register", params: [
                 "token": token, "topic": topic, "environment": environment,
                 "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
             ])
+            let registered = try self.decoder.decode(NativePushRegistrationResult.self, from: registeredData)
+            guard generation == self.clientGeneration else { return }
+            if registered.registered {
+                // Register itself is authenticated proof. Preserve routing even if the
+                // subsequent readiness/status request is interrupted by suspension.
+                UserDefaults.standard.set([
+                    "url": self.profile.gatewayURL.absoluteString,
+                    "gatewayDeviceID": registered.gatewayDeviceId,
+                ], forKey: self.remotePushBindingKey)
+            }
             let data = try await client.request(method: "push.native.status", params: [:])
             let status = try self.decoder.decode(NativePushStatus.self, from: data)
             guard generation == self.clientGeneration else { return }

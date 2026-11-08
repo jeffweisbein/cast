@@ -68,3 +68,9 @@ public struct NativePushStatus: Decodable, Sendable {
     public let configured: Bool
     public let gatewayDeviceId: String
 }
+
+public struct NativePushRegistrationResult: Decodable, Sendable {
+    public let registered: Bool
+    public let enabled: Bool
+    public let gatewayDeviceId: String
+}
