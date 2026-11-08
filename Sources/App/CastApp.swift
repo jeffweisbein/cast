@@ -5,6 +5,9 @@ import AppKit
 
 @main
 struct CastApp: App {
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(CastNotificationAppDelegate.self) private var notificationDelegate
+    #endif
     @StateObject private var manager: WorkspaceManager
     @Environment(\.scenePhase) private var scenePhase
     #if os(macOS) && DEBUG
@@ -17,6 +20,7 @@ struct CastApp: App {
 
     init() {
         CastLifecycleDiagnostics.appStarted()
+        NativeNotificationResponseRouter.shared.install()
         #if os(macOS) && DEBUG
         let environment = ProcessInfo.processInfo.environment
         let configuration = OfflineLayoutStressConfiguration.resolve(
@@ -93,22 +97,45 @@ struct CastApp: App {
             .environmentObject(self.manager)
             .task {
                 guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+                NativeNotificationResponseRouter.shared.openDestination = { [weak manager = self.manager] destination in
+                    manager?.openNotification(destination) ?? false
+                }
+                NativeNotificationResponseRouter.shared.presentRemoteDestination = { [weak manager = self.manager] destination in
+                    manager?.observeRemoteNotification(destination, presenting: true) ?? false
+                }
+                NativeNotificationResponseRouter.shared.consumePendingDestination()
+                self.manager.setApplicationActive(self.scenePhase == .active)
+                await self.manager.reconcileDeliveredNotifications()
                 self.manager.start()
+                await NativePushRegistration.shared.registerIfAuthorized()
                 #if os(iOS)
                 await self.manager.consumePendingShares()
                 #endif
             }
+            .onReceive(NotificationCenter.default.publisher(for: NativePushRegistration.changed)) { _ in
+                self.manager.syncRemoteNotificationPreferences()
+            }
             .onChange(of: self.scenePhase) { _, phase in
+                self.manager.setApplicationActive(phase == .active)
                 switch phase {
                 case .active:
                     CastLifecycleDiagnostics.transition("active")
-                    Task { await self.manager.refreshAllAfterActivation() }
+                    Task {
+                        await self.manager.reconcileDeliveredNotifications()
+                        await self.manager.refreshAllAfterActivation()
+                    }
                     #if os(iOS)
-                    Task { await self.manager.consumePendingShares() }
+                    Task {
+                        await NativePushRegistration.shared.registerIfAuthorized()
+                        self.manager.syncRemoteNotificationPreferences()
+                        await self.manager.consumePendingShares()
+                    }
                     #endif
                 case .background:
                     CastLifecycleDiagnostics.transition("background")
+                    #if os(iOS)
                     self.manager.suspendAllForBackground()
+                    #endif
                 case .inactive:
                     CastLifecycleDiagnostics.transition("inactive")
                 @unknown default:

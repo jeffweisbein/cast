@@ -71,6 +71,9 @@ final class OperationsLedgerTests: XCTestCase {
 
         store.handleEvent(event)
         store.handleEvent(event)
+        let completion = try taskCompletionEvent(sessionKey: "agent:main:other")
+        store.handleEvent(completion)
+        store.handleEvent(completion)
 
         XCTAssertEqual(store.numericUnreadCount, 1)
         XCTAssertEqual(store.unreadCount(for: "agent:main:other"), 1)
@@ -625,6 +628,7 @@ final class MuteLedgerTests: XCTestCase {
         XCTAssertTrue(store.isSessionMuted("agent:main:noisy"))
 
         store.handleEvent(try self.replyEvent(sessionKey: "agent:main:noisy", id: "m-1"))
+        store.handleEvent(try taskCompletionEvent(sessionKey: "agent:main:noisy", runID: "muted"))
 
         // Unread accounting is untouched: mute is not "mark as read".
         XCTAssertEqual(store.unreadCount(for: "agent:main:noisy"), 1)
@@ -636,6 +640,7 @@ final class MuteLedgerTests: XCTestCase {
         // An unmuted session in the same store keeps the normal path (test-host
         // suppression, not "muted").
         store.handleEvent(try self.replyEvent(sessionKey: "agent:main:other", id: "m-2"))
+        store.handleEvent(try taskCompletionEvent(sessionKey: "agent:main:other", runID: "unmuted"))
         let other = try XCTUnwrap(store.notificationRecords.first(where: {
             $0.linkage.sessionKey == "agent:main:other"
         }))
@@ -713,6 +718,7 @@ final class SidebarVisibilityTests: XCTestCase {
             ]],
         ]))
         store.handleEvent(event)
+        store.handleEvent(try taskCompletionEvent(sessionKey: key))
         XCTAssertTrue(store.isSessionHidden(key))
         XCTAssertEqual(store.numericUnreadCount, 0)
         XCTAssertEqual(store.unreadCount(for: key), 0)

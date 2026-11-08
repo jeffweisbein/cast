@@ -418,6 +418,14 @@ public final class ChatStore {
     public private(set) var numericUnreadCount = 0
     public private(set) var unreadCountsBySession: [String: Int] = [:]
     public private(set) var notificationRecords: [NotificationDeliveryRecord] = []
+    /// Updated by the workspace scene, not by a socket event or selected-session cache.
+    public var isNotificationContextVisible = true
+    public private(set) var remotePushEnabled = false
+    public private(set) var remotePushReady = false
+    public private(set) var remotePushStatus = "Remote notifications are off."
+    @ObservationIgnored private var remotePushSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var remotePushRevision = 0
+    @ObservationIgnored private var remotePushOptInRevision = 0
     public private(set) var automationRuns: [CronRun] = []
     public private(set) var automationRunsState: AutomationRunsState = .idle
     public private(set) var mutedSessionKeys: Set<String> = []
@@ -618,6 +626,7 @@ public final class ChatStore {
         operationsLedgerRoot: URL? = nil)
     {
         self.profile = profile
+        self.remotePushEnabled = UserDefaults.standard.bool(forKey: "cast.push.enabled.\(profile.id)")
         self.cache = TranscriptCache(workspaceID: profile.id, root: transcriptCacheRoot)
         let operationsRoot: URL
         if let operationsLedgerRoot {
@@ -1079,6 +1088,7 @@ public final class ChatStore {
         Task { await self.refreshSecretRequests() }
         Task { await self.refreshQuestions() }
         Task { await self.subscribeToSessions() }
+        self.scheduleRemotePushSync()
         #if DEBUG
         self.startIsolatedSendSmokeIfRequested()
         self.startTokenRotationSmokeIfRequested()
@@ -2727,6 +2737,7 @@ public final class ChatStore {
             try self.sidebarPreferencesStore.save(preferences)
             self.sidebarPreferences = preferences
             self.publishOperationsState()
+            self.scheduleRemotePushSync()
             return true
         } catch {
             self.showError("Couldn’t save sidebar preferences. Please try again.")
@@ -2747,6 +2758,7 @@ public final class ChatStore {
         self.mutedSessionKeys = self.muteLedger.mutedSessionKeys
         let mutes = self.muteLedger
         Task { await self.operationsPersistence.save(mutes: mutes) }
+        self.scheduleRemotePushSync()
     }
 
     public func toggleSessionMuted(_ sessionKey: String) {
@@ -3011,6 +3023,7 @@ public final class ChatStore {
     }
 
     private func handleChatEvent(_ event: EventFrame) {
+        self.recordTaskCompletion(event)
         guard let payload = self.decodePayload(event, as: ChatEventPayload.self), let key = self.selectedSessionKey else { return }
         let ownsRun = payload.runId.map { self.turnActivity.contains($0) } ?? false
         guard SessionKeyMatcher.matches(payload.sessionKey, key) || ownsRun else { return }
@@ -3128,7 +3141,7 @@ public final class ChatStore {
             ? decoded
             : decoded.identifiedByContent()
         if !message.isUser,
-           !SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey)
+           !(self.isNotificationContextVisible && SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey))
         {
             self.recordUnreadReply(
                 sessionKey: eventSessionKey,
@@ -3380,6 +3393,7 @@ public final class ChatStore {
     private func handleHello(_ event: EventFrame) {
         gatewayMethodsKnown = true
         self.gatewayMethods = Set(event.payload?["features"]?["methods"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        self.scheduleRemotePushSync()
         if !self.gatewayMethods.contains("sessions.compact") { self.contextCompactionOfferKey = nil }
         self.gatewayVersion = event.payload?["server"]?["version"]?.stringValue
         self.modelCatalog = []
@@ -3469,7 +3483,7 @@ public final class ChatStore {
     private func reconcileOperations(with sessions: [SessionRow]) {
         for session in sessions {
             let watermark = Self.operationWatermark(session.updatedAt)
-            if SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
+            if self.isNotificationContextVisible && SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
                 _ = self.unreadLedger.clearOnOpen(
                     workspaceID: self.profile.id,
                     sessionKey: session.key,
@@ -3532,13 +3546,30 @@ public final class ChatStore {
             watermark: watermark) == .incremented
         else { return }
 
+        self.publishOperationsState()
+    }
+
+    private func recordTaskCompletion(_ event: EventFrame) {
+        // Message events include progress/commentary. Only a non-yielded terminal chat
+        // result is a completion; a reconnect/history snapshot must never manufacture one.
+        guard let payload = event.payload,
+              payload["state"]?.stringValue == "final",
+              payload["yielded"]?.boolValue != true,
+              payload["transcriptOnly"]?.boolValue != true,
+              let runID = payload["runId"]?.stringValue, !runID.isEmpty,
+              let sessionKey = payload["sessionKey"]?.stringValue, !sessionKey.isEmpty
+        else { return }
+        // A ready iOS registration owns delivery through APNs. The foreground delegate
+        // applies this same ledger and visibility policy, avoiding a second local banner.
+        if self.remotePushReady { return }
+        let eventID = "completion:\(runID)"
         let dedupeID = "\(self.profile.id):\(eventID)"
         let now = Date()
         let linkage = NotificationLinkage(
             workspaceID: self.profile.id,
             sessionKey: sessionKey,
             sourceEventID: eventID,
-            messageID: eventID)
+            messageID: nil)
         guard self.notificationLedger.observe(
             dedupeID: dedupeID,
             linkage: linkage,
@@ -3553,15 +3584,22 @@ public final class ChatStore {
         // tests can observe the "muted" suppression reason.
         let muted = self.muteLedger.isMuted(sessionKey: sessionKey)
         let hidden = self.isSessionHidden(sessionKey)
-        let shouldDeliverNatively = !muted && !hidden
+        let visible = self.isNotificationContextVisible
+            && SessionKeyMatcher.matches(sessionKey, self.selectedSessionKey)
+        #if os(iOS)
+        let enabled = self.remotePushEnabled
+        #else
+        let enabled = true
+        #endif
+        let shouldDeliverNatively = enabled && !muted && !hidden && !visible
             && ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
         if shouldDeliverNatively {
             _ = self.notificationLedger.markEligible(
                 dedupeID: dedupeID,
                 at: now,
-                detail: "unread-agent-reply")
+                detail: "task-completed")
         } else {
-            let reason = hidden ? "hidden" : (muted ? "muted" : "test-host")
+            let reason = !enabled ? "notifications-off" : (hidden ? "hidden" : (muted ? "muted" : (visible ? "visible-session" : "test-host")))
             _ = self.notificationLedger.markSuppressed(
                 dedupeID: dedupeID,
                 at: now,
@@ -3570,11 +3608,10 @@ public final class ChatStore {
         self.publishOperationsState()
         guard shouldDeliverNatively else { return }
 
-        let row = self.sessions.first(where: { $0.key == sessionKey })
-        let title = row.map {
-            SidebarGrouper.displayTitle(for: $0, mainSessionKey: self.mainSessionKey)
-        } ?? "Agent reply"
-        let body = SidebarGrouper.cleanPreview(row?.lastMessagePreview) ?? "A new reply needs your attention."
+        // Lock-screen copy is intentionally generic: neither session titles nor previews
+        // should expose private work to someone holding a locked device.
+        let title = "Task complete"
+        let body = "Open Cast to view the result."
         Task {
             let outcome = await NativeNotificationDelivery.shared.deliver(
                 identifier: dedupeID,
@@ -3649,6 +3686,133 @@ public final class ChatStore {
 
     public func requestNotificationAuthorization() async -> Bool {
         await NativeNotificationDelivery.shared.requestAuthorization()
+    }
+
+    // MARK: - Remote task completion notifications
+
+    public func setRemotePushEnabled(_ enabled: Bool) async {
+        self.remotePushOptInRevision += 1
+        let revision = self.remotePushOptInRevision
+        if enabled {
+            guard await self.requestNotificationAuthorization() else {
+                self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
+                return
+            }
+        }
+        guard revision == self.remotePushOptInRevision else { return }
+        self.remotePushEnabled = enabled
+        if !enabled { self.remotePushReady = false }
+        UserDefaults.standard.set(enabled, forKey: "cast.push.enabled.\(self.profile.id)")
+        if enabled { await NativePushRegistration.shared.registerIfAuthorized() }
+        self.scheduleRemotePushSync()
+    }
+
+    /// Serial preference sync: a later mute/opt-out can never be overtaken by an earlier
+    /// registration request. Offline changes remain pending and are retried at reconnect.
+    public func scheduleRemotePushSync() {
+        #if os(iOS)
+        self.remotePushRevision += 1
+        guard self.remotePushSyncTask == nil,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        self.remotePushSyncTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let revision = self.remotePushRevision
+                await self.syncRemotePush()
+                if revision == self.remotePushRevision { break }
+            }
+            self.remotePushSyncTask = nil
+        }
+        #endif
+    }
+
+    private var remotePushBindingKey: String { "cast.push.binding.\(self.profile.id)" }
+
+    public func acceptsRemoteNotification(_ destination: NativeNotificationDestination) -> Bool {
+        guard destination.workspaceID == self.profile.id,
+              let gatewayID = destination.gatewayDeviceID,
+              let binding = UserDefaults.standard.dictionary(forKey: self.remotePushBindingKey),
+              binding["url"] as? String == self.profile.gatewayURL.absoluteString,
+              binding["gatewayDeviceID"] as? String == gatewayID else { return false }
+        return true
+    }
+
+    /// Records an actual APNs delivery (or a foreground delivery decision) in the same
+    /// persisted per-run ledger used by local events. Replayed socket finals stay silent.
+    @discardableResult
+    public func observeRemoteCompletion(_ destination: NativeNotificationDestination, presenting: Bool) -> Bool {
+        guard self.acceptsRemoteNotification(destination), let runID = destination.runID else { return false }
+        let eventID = "completion:\(runID)"
+        let dedupeID = "\(self.profile.id):\(eventID)"
+        let now = Date()
+        guard self.notificationLedger.observe(dedupeID: dedupeID,
+            linkage: NotificationLinkage(workspaceID: self.profile.id, sessionKey: destination.sessionKey, sourceEventID: eventID),
+            at: now) == .inserted else { return false }
+        let visible = self.isNotificationContextVisible && SessionKeyMatcher.matches(destination.sessionKey, self.selectedSessionKey)
+        let suppressed = presenting && (!self.remotePushEnabled || self.isSessionMuted(destination.sessionKey)
+            || self.isSessionHidden(destination.sessionKey) || visible)
+        if suppressed {
+            _ = self.notificationLedger.markSuppressed(dedupeID: dedupeID, at: now, reason: "foreground-policy")
+        } else {
+            _ = self.notificationLedger.markEligible(dedupeID: dedupeID, at: now, detail: "remote-task-completed")
+            _ = self.notificationLedger.markDelivered(dedupeID: dedupeID, at: now, detail: "remote-notification")
+        }
+        self.publishOperationsState()
+        return !suppressed
+    }
+
+    private func syncRemotePush() async {
+        self.remotePushReady = false
+        guard let client = self.client, case .connected = self.connectionState else {
+            self.remotePushStatus = self.remotePushEnabled ? "Waiting for a connection to enable alerts." : "Notifications are off here. Reconnect to stop any remote alerts."
+            return
+        }
+        guard self.gatewayMethods.isSuperset(of: ["push.native.register", "push.native.unregister", "push.native.status"]) else {
+            self.remotePushStatus = "This workspace needs an update before it can send remote alerts."
+            return
+        }
+        do {
+            if !self.remotePushEnabled {
+                _ = try await client.request(method: "push.native.unregister", params: [:])
+                self.remotePushStatus = "Remote notifications are off."
+                return
+            }
+            guard await NativeNotificationDelivery.shared.isAuthorized() else {
+                _ = try await client.request(method: "push.native.unregister", params: [:])
+                self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
+                return
+            }
+            let registration = NativePushRegistration.shared
+            guard let token = registration.token, let environment = registration.environment,
+                  let topic = Bundle.main.bundleIdentifier else {
+                self.remotePushStatus = registration.failureMessage ?? "Waiting for Apple notification registration."
+                return
+            }
+            let excluded = Set(self.mutedSessionKeys).union(self.sidebarPreferences.hiddenKeys).sorted()
+            guard excluded.count <= 1000 else {
+                _ = try await client.request(method: "push.native.unregister", params: [:])
+                self.remotePushStatus = "Too many muted chats to safely enable remote notifications."
+                return
+            }
+            let generation = self.clientGeneration
+            _ = try await client.request(method: "push.native.register", params: [
+                "token": token, "topic": topic, "environment": environment,
+                "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
+            ])
+            let data = try await client.request(method: "push.native.status", params: [:])
+            let status = try self.decoder.decode(NativePushStatus.self, from: data)
+            guard generation == self.clientGeneration else { return }
+            UserDefaults.standard.set([
+                "url": self.profile.gatewayURL.absoluteString,
+                "gatewayDeviceID": status.gatewayDeviceId,
+            ], forKey: self.remotePushBindingKey)
+            self.remotePushReady = status.registered && status.enabled && status.configured
+            self.remotePushStatus = self.remotePushReady
+                ? "Task alerts are ready, even when Cast is closed."
+                : "This workspace still needs notification delivery configured."
+        } catch {
+            self.remotePushStatus = "Notification settings could not sync. Reconnect to try again."
+        }
     }
 
     // MARK: - Progress card

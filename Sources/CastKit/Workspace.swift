@@ -187,6 +187,7 @@ public final class WorkspaceManager: ObservableObject {
     @Published public private(set) var unreadSessionCount = 0
 
     private var stores: [String: ChatStore] = [:]
+    private var isApplicationActive = true
     private var unreadCountsByWorkspace: [String: Int] = [:]
     /// Workspaces whose store is already being tracked, so re-entry through `store(for:)`
     /// cannot install a second observation loop for the same store.
@@ -291,6 +292,7 @@ public final class WorkspaceManager: ObservableObject {
         if let existing = self.stores[workspaceID] { return existing }
         let profile = self.profiles.first(where: { $0.id == workspaceID }) ?? .unconfigured
         let store = ChatStore(profile: profile)
+        store.isNotificationContextVisible = self.isApplicationActive && workspaceID == self.selectedWorkspaceID
         self.stores[workspaceID] = store
         self.observeUnreadCount(store, workspaceID: workspaceID)
         return store
@@ -349,6 +351,43 @@ public final class WorkspaceManager: ObservableObject {
         #endif
     }
 
+    public func observeRemoteNotification(_ destination: NativeNotificationDestination, presenting: Bool) -> Bool {
+        guard self.profiles.contains(where: { $0.id == destination.workspaceID }) else { return false }
+        return self.store(for: destination.workspaceID).observeRemoteCompletion(destination, presenting: presenting)
+    }
+
+    public func reconcileDeliveredNotifications() async {
+        for destination in await NativeNotificationDelivery.shared.deliveredRemoteDestinations() {
+            _ = self.observeRemoteNotification(destination, presenting: false)
+        }
+    }
+
+    public func syncRemoteNotificationPreferences() {
+        for profile in self.profiles { self.store(for: profile.id).scheduleRemotePushSync() }
+    }
+
+    public func setApplicationActive(_ active: Bool) {
+        self.isApplicationActive = active
+        for (workspaceID, store) in self.stores {
+            store.isNotificationContextVisible = active && workspaceID == self.selectedWorkspaceID
+        }
+    }
+
+    /// A notification may select only an already-configured workspace. Session visibility
+    /// and access remain authoritative at the gateway when history is loaded.
+    @discardableResult
+    public func openNotification(_ destination: NativeNotificationDestination) -> Bool {
+        guard self.profiles.contains(where: { $0.id == destination.workspaceID }) else { return false }
+        let store = self.store(for: destination.workspaceID)
+        if destination.gatewayDeviceID != nil, !store.acceptsRemoteNotification(destination) { return false }
+        if destination.gatewayDeviceID != nil {
+            store.observeRemoteCompletion(destination, presenting: false)
+        }
+        self.select(destination.workspaceID)
+        self.selectedStore.selectedSessionKey = destination.sessionKey
+        return true
+    }
+
     public func suspendAllForBackground() {
         for profile in self.profiles {
             self.store(for: profile.id).suspendForBackground()
@@ -364,6 +403,7 @@ public final class WorkspaceManager: ObservableObject {
     public func select(_ workspaceID: String) {
         guard self.profiles.contains(where: { $0.id == workspaceID }) else { return }
         self.selectedWorkspaceID = workspaceID
+        self.setApplicationActive(self.isApplicationActive)
         self.defaults.set(workspaceID, forKey: "cast.selectedWorkspace")
         self.publishShareDestinations()
         let selectedStore = self.store(for: workspaceID)

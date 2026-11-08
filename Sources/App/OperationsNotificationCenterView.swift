@@ -20,6 +20,17 @@ struct OperationsNotificationCenterView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Task completion alerts") {
+                    #if os(iOS)
+                    Toggle("Notify me when tasks finish", isOn: Binding(
+                        get: { self.store.remotePushEnabled },
+                        set: { enabled in Task { await self.store.setRemotePushEnabled(enabled) } }))
+                    Text(self.store.remotePushStatus)
+                        .font(.caption).foregroundStyle(.secondary)
+                    #else
+                    Text("Get an alert when a task finishes while you are away from its chat. Keep Cast running and connected. Muted chats do not send alerts.")
+                    #endif
+                }
                 if let authorizationMessage {
                     Section {
                         Label(authorizationMessage, systemImage: "bell")
@@ -31,7 +42,7 @@ struct OperationsNotificationCenterView: View {
                     ContentUnavailableView(
                         self.query.isEmpty ? "No notifications yet" : "No matching notifications",
                         systemImage: "bell.slash",
-                        description: Text("Agent replies and delivery outcomes appear here."))
+                        description: Text("Task completions and delivery outcomes appear here."))
                 } else {
                     ForEach(self.records) { record in
                         Button {
@@ -74,16 +85,18 @@ struct OperationsNotificationCenterView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { self.dismiss() }
                 }
+                #if os(macOS)
                 ToolbarItem(placement: .automatic) {
                     Button("Enable Notifications") {
                         Task {
                             let granted = await self.store.requestNotificationAuthorization()
                             self.authorizationMessage = granted
-                                ? "Native alerts and app-icon badges are enabled."
+                                ? "System notification permission is granted. Delivery still requires an active connection."
                                 : "Notification permission was not granted. In-app history remains available."
                         }
                     }
                 }
+                #endif
             }
         }
         #if os(macOS)

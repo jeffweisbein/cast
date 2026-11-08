@@ -29,6 +29,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CastAPNSEnvironment</key>
+	<string>$(CAST_APNS_ENVIRONMENT)</string>
 	<key>CastGitSHA</key>
 	<string>$(CAST_GIT_SHA)</string>
 	<key>NSAppTransportSecurity</key>
