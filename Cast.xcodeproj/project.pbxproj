@@ -202,6 +202,7 @@
 		D2B6F6B8AAB2AA215F9225F6 /* AssistantMarkdownSegmentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C28FDE10B6DFEC5DD4B77E2 /* AssistantMarkdownSegmentsTests.swift */; };
 		D2D21F0E5C89B350DE7D5DA7 /* NeedsYouView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F567B6C19A32A1D17E13082F /* NeedsYouView.swift */; };
 		D35CE64CAEF2DE580AFB51D9 /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 203ED0D9E62BABE111C5C819 /* VoiceRecorder.swift */; };
+		D3C6B95F62A1E63A8001F15A /* MacOSWindowSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057A4CC0720785148029EFC9 /* MacOSWindowSizingTests.swift */; };
 		D424521CD394292711B63A6D /* TranscriptDuplicateCollapseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0364EA54F534ECCFB4B87FA5 /* TranscriptDuplicateCollapseTests.swift */; };
 		D4D1A608DFDD91631629CD59 /* CodeBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D9BDE099155F6C1F20C7C42 /* CodeBlockView.swift */; };
 		D5CF27C0FC7EB8D4DD50CB97 /* cast-desktop.py in Resources */ = {isa = PBXBuildFile; fileRef = DED78540B47313ED4F3D8780 /* cast-desktop.py */; };
@@ -289,6 +290,7 @@
 /* Begin PBXFileReference section */
 		00A250D997783468F0DD23DA /* CastShareExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = CastShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		0364EA54F534ECCFB4B87FA5 /* TranscriptDuplicateCollapseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDuplicateCollapseTests.swift; sourceTree = "<group>"; };
+		057A4CC0720785148029EFC9 /* MacOSWindowSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSWindowSizingTests.swift; sourceTree = "<group>"; };
 		0B9B1BD80F0B4F20A5F31048 /* ComposerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerModel.swift; sourceTree = "<group>"; };
 		0BB991DF60F8683714BBF92F /* OperationsSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsSearchView.swift; sourceTree = "<group>"; };
 		0C28FDE10B6DFEC5DD4B77E2 /* AssistantMarkdownSegmentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMarkdownSegmentsTests.swift; sourceTree = "<group>"; };
@@ -604,6 +606,7 @@
 				7ADFA9395064D59D149E8B3A /* LiveHistoryReconcileTests.swift */,
 				858EE6EBE8B26FA541EBEEE7 /* LocalDictationTests.swift */,
 				43739DA2873F43E43D1B3D61 /* MacOSComposerFocusTests.swift */,
+				057A4CC0720785148029EFC9 /* MacOSWindowSizingTests.swift */,
 				E1D6A9C662E59EECE5F4EF0D /* MainThreadWatchdogTests.swift */,
 				A94600880AA9EB139E4EBB42 /* ManagedAttachmentTests.swift */,
 				6D64A46CA41EBC2B4C5CAB59 /* NotificationBulkActionTests.swift */,
@@ -915,6 +918,7 @@
 				125EABC32A00EE3352DE88C9 /* LiveHistoryReconcileTests.swift in Sources */,
 				B7344559A88183ED2480B61A /* LocalDictationTests.swift in Sources */,
 				BB49444236DF953C5CC6B3AB /* MacOSComposerFocusTests.swift in Sources */,
+				D3C6B95F62A1E63A8001F15A /* MacOSWindowSizingTests.swift in Sources */,
 				A686276A67CE53281D6311DE /* MainThreadWatchdogTests.swift in Sources */,
 				97447A63A1D0FC0BC9CB31E5 /* ManagedAttachmentTests.swift in Sources */,
 				F0FF210D7815A2DC740DD32C /* NotificationBulkActionTests.swift in Sources */,

@@ -634,6 +634,12 @@ struct ChatView: View {
         .sheet(item: self.$documentLink) { link in
             DocumentLinkView(link: link, store: self.store)
         }
+        #if os(macOS)
+        // Bound the viewport's minimum, not the current transcript/status/composer
+        // content. NavigationSplitView otherwise propagates changing fitting sizes to
+        // NSWindow, so typing and sending can enlarge a manually resized window.
+        .frame(minWidth: 480, minHeight: 320)
+        #endif
     }
 
     private var currentFindMatchID: String? { findMatches.indices.contains(findIndex) ? findMatches[findIndex] : nil }
