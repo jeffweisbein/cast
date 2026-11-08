@@ -299,19 +299,14 @@ final class VoiceRecorderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
-    func testFrameValidationRejectsOversizedAudioPayloads() {
+    func testFrameValidationRoutesOversizedAudioThroughStaging() {
         let oversized = PreparedAttachment(
             type: "audio",
             mimeType: "audio/mp4",
             fileName: "Voice Message.m4a",
             data: Data(count: AttachmentProcessor.maxFrameBytes))
-        XCTAssertThrowsError(
-            try AttachmentProcessor.validateFrame(message: "", attachments: [oversized]))
-        { error in
-            guard case AttachmentError.payloadTooLarge = error else {
-                return XCTFail("Expected payloadTooLarge, got \(error)")
-            }
-        }
+        XCTAssertTrue(try AttachmentProcessor.requiresUpload(message: "", attachments: [oversized]))
+        XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "", attachments: [oversized]))
 
         let reasonable = PreparedAttachment(
             type: "audio",

@@ -133,7 +133,7 @@ final class ArtifactNetworkTests: XCTestCase {
         XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "", attachments: [large]))
         let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
         let message = "quote\" slash/ backslash\\ control\u{0001}\n🦊\u{2028}"
-        let payload = AnyCodable(["message": message, "attachments": [small.rpcValue]] as [String: Any?])
+        let payload = AnyCodable(["message": message, "attachments": [try small.rpcValue]] as [String: Any?])
         XCTAssertEqual(try AttachmentProcessor.frameByteCount(message: message, attachments: [small]), try encoder.encode(payload).count)
     }
 

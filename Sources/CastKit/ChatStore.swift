@@ -11,13 +11,13 @@ struct PendingEcho: Sendable {
 }
 
 /// The exact chat.send inputs a bubble needs to resend itself. Kept off the message row
-/// because prepared attachment payloads (up to ~24 MB of base64 source bytes) are far too
-/// heavy to persist per cached message; the row's echo text and placeholders cannot stand
-/// in for them.
+/// because attachment bytes/references belong to the workspace outbox, not cached message
+/// rows. Echo text and placeholders cannot stand in for the original immutable payload.
 struct PendingSendContext: Sendable, Codable, Equatable {
     let text: String
-    let attachments: [PreparedAttachment]
+    var attachments: [PreparedAttachment]
     let deliver: Bool
+    var sessionID: String? = nil
 }
 
 /// Tracks locally accepted sends separately from gateway-confirmed runs. A history page can
@@ -487,6 +487,15 @@ public final class ChatStore {
     /// accepts the send; a failed entry stays so retry can resend the identical payload.
     @ObservationIgnored
     private var sendContexts: [String: PendingSendContext] = [:]
+    @ObservationIgnored private var sendTasks: [String: Task<Void, Never>] = [:]
+    public private(set) var uploadProgress: [String: AttachmentUploadProgress] = [:]
+    @ObservationIgnored private var uploadSessionKeys: [String: String] = [:]
+    public var currentUploadProgress: AttachmentUploadProgress? {
+        uploadProgress.first { uploadSessionKeys[$0.key] == selectedSessionKey }?.value
+    }
+    public func cancelCurrentUploads() {
+        for (id, key) in uploadSessionKeys where key == selectedSessionKey { sendTasks[id]?.cancel() }
+    }
     @ObservationIgnored
     private var transcriptSnapshots = TranscriptSnapshotStore()
     @ObservationIgnored
@@ -964,6 +973,8 @@ public final class ChatStore {
         self.questionInbox = QuestionInbox()
         self.questionError = nil
         if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
+            for task in sendTasks.values { task.cancel() }
+            attachmentDrafts.values.flatMap { $0 }.forEach { $0.removeOwnedFile() }; unselectedAttachments.forEach { $0.removeOwnedFile() }
             attachmentDrafts.removeAll(); unselectedAttachments = []
             downloads.reset()
             approvals = []; approvalActivity = [:]; approvalRefreshError = nil; approvalRevision &+= 1
@@ -2107,6 +2118,10 @@ public final class ChatStore {
         guard !trimmed.isEmpty || !outgoing.isEmpty, let client = self.client, let key = self.selectedSessionKey else { return false }
         do {
             try AttachmentProcessor.validateFrame(message: trimmed, attachments: outgoing)
+            if try AttachmentProcessor.requiresUpload(message: trimmed, attachments: outgoing),
+               !gatewayMethods.isSuperset(of: ["chat.upload.policy", "chat.upload.begin", "chat.upload.chunk", "chat.upload.cancel"]) {
+                throw AttachmentError.uploadsUnavailable
+            }
         } catch {
             self.lastError = error.localizedDescription
             return false
@@ -2138,7 +2153,8 @@ public final class ChatStore {
         self.sendContexts[idempotencyKey] = PendingSendContext(
             text: trimmed,
             attachments: outgoing,
-            deliver: deliver ?? self.deliverExternally)
+            deliver: deliver ?? self.deliverExternally,
+            sessionID: sessions.first(where: { $0.key == key })?.modelInfo?.sessionId)
         self.dispatchSend(
             client: client,
             sessionKey: key,
@@ -2198,10 +2214,13 @@ public final class ChatStore {
         idempotencyKey: String,
         completion: ((Bool) -> Void)? = nil)
     {
-        guard let context = self.sendContexts[idempotencyKey] else { return }
+        guard var context = self.sendContexts[idempotencyKey] else { return }
         let optimisticMessages = self.messages
         let optimisticHistoryIsComplete = self.completeHistorySessionKeys.contains(sessionKey)
-        Task {
+        guard sendTasks[idempotencyKey] == nil else { return }
+        uploadSessionKeys[idempotencyKey] = sessionKey
+        sendTasks[idempotencyKey] = Task {
+            defer { sendTasks[idempotencyKey] = nil; uploadProgress[idempotencyKey] = nil; uploadSessionKeys[idempotencyKey] = nil }
             // Persist the image + caption bubble before the network request so an app
             // background/termination or a slow gateway cannot make the sent message vanish.
             await self.cache.save(
@@ -2210,15 +2229,32 @@ public final class ChatStore {
                 historyIsComplete: optimisticHistoryIsComplete)
             var persisted = false
             do {
+                try Task.checkCancellation()
+                if try AttachmentProcessor.requiresUpload(message: context.text, attachments: context.attachments) {
+                    let originals = context.attachments
+                    let backing = Task.detached(priority: .userInitiated) { try AttachmentFiles.diskBacked(originals) }
+                    context.attachments = try await withTaskCancellationHandler { try await backing.value } onCancel: { backing.cancel() }
+                    self.sendContexts[idempotencyKey] = context
+                    try Task.checkCancellation()
+                }
                 try await self.sendOutbox.save(StoredSend(sessionKey: sessionKey, idempotencyKey: idempotencyKey,
                     context: context, createdAt: Date()))
                 persisted = true
+                if context.sessionID == nil, try AttachmentProcessor.requiresUpload(message: context.text, attachments: context.attachments) {
+                    let resolved = try await client.attachmentSessionID(sessionKey: sessionKey)
+                    context = try await self.sendOutbox.bindSessionID(resolved, key: idempotencyKey, sessionKey: sessionKey).context
+                    self.sendContexts[idempotencyKey] = context
+                    try Task.checkCancellation()
+                }
                 let data = try await client.sendChat(
                     sessionKey: sessionKey,
                     message: context.text,
                     idempotencyKey: idempotencyKey,
                     deliver: context.deliver,
-                    attachments: context.attachments)
+                    attachments: context.attachments, sessionID: context.sessionID,
+                    uploadProgress: { [weak self] progress in
+                        Task { @MainActor in self?.uploadProgress[idempotencyKey] = progress }
+                    })
                 self.pendingModelChanges.removeValue(forKey: sessionKey)
                 if let response = try? self.decoder.decode(ChatSendResponse.self, from: data),
                    let runId = response.runId,
@@ -2239,7 +2275,7 @@ public final class ChatStore {
                 self.setLocalDeliveryState(state, messageID: echoID, sessionKey: sessionKey)
                 self.lastError = state == .uncertain
                     ? "Delivery is unconfirmed. Cast will refresh the conversation when it reconnects. It will not automatically resend."
-                    : (persisted ? GatewayFailurePolicy.messageSendAlert : "Couldn’t safely save this send on your device. This attempt was not submitted. Free some disk space and retry.")
+                    : (error is AttachmentError || error is CancellationError ? (error is CancellationError ? "Upload cancelled. Your original files are kept; use Retry when ready." : error.localizedDescription) : (persisted ? GatewayFailurePolicy.messageSendAlert : "Couldn’t safely save this send on your device. This attempt was not submitted. Free some disk space and retry."))
                 completion?(false)
             }
         }
@@ -2301,11 +2337,17 @@ public final class ChatStore {
         AttachmentDraftTarget(workspaceID: profile.id, gatewayURL: profile.gatewayURL, sessionKey: selectedSessionKey)
     }
     func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) {
-        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else { return }
+        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else {
+            if case let .success(attachment) = result { attachment.removeOwnedFile() }; return
+        }
         switch result {
         case let .success(attachment):
+            let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
+            do { try AttachmentProcessor.validateBatch(existing + [attachment]) }
+            catch { attachment.removeOwnedFile(); if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }; return }
             if let key = target.sessionKey { attachmentDrafts[key, default: []].append(attachment) }
             else if selectedSessionKey == nil { unselectedAttachments.append(attachment) }
+            else { attachment.removeOwnedFile() }
         case let .failure(error):
             if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }
         }
@@ -2334,7 +2376,8 @@ public final class ChatStore {
     }
 
     public func addAttachments(_ attachments: [PreparedAttachment]) {
-        self.pendingAttachments.append(contentsOf: attachments)
+        do { try AttachmentProcessor.validateBatch(self.pendingAttachments + attachments); self.pendingAttachments.append(contentsOf: attachments) }
+        catch { attachments.forEach { $0.removeOwnedFile() }; self.lastError = error.localizedDescription }
     }
 
     // MARK: - Drafts
@@ -2361,6 +2404,7 @@ public final class ChatStore {
     }
 
     public func removeAttachment(id: UUID) {
+        self.pendingAttachments.filter { $0.id == id }.forEach { $0.removeOwnedFile() }
         self.pendingAttachments.removeAll { $0.id == id }
     }
 

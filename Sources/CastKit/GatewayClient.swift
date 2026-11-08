@@ -60,6 +60,7 @@ public actor GatewayClient {
     private let session: URLSession = .init(configuration: .default)
     private var task: URLSessionWebSocketTask?
     private var pending: [String: CheckedContinuation<ResponseFrame, Error>] = [:]
+    private var uploadMethods: Set<String> = []
     private var connected = false
     private var isConnecting = false
     private var connectionWaiters: [CheckedContinuation<Void, Error>] = []
@@ -210,6 +211,7 @@ public actor GatewayClient {
                 onTimeout: { task.cancel(with: .goingAway, reason: nil) }) {
                     try await self.performConnect(task: task, nonce: nonce)
                 }
+            self.uploadMethods = Set(helloPayload["features"]?["methods"]?.arrayValue?.compactMap(\.stringValue) ?? [])
             let mainSessionKey = helloPayload["snapshot"]?["sessionDefaults"]?["mainSessionKey"]?.stringValue
             if let tick = helloPayload["policy"]?["tickIntervalMs"]?.doubleValue,
                let clamped = Self.clampedMs(tick, min: 1_000, max: 600_000) {
@@ -575,7 +577,9 @@ public actor GatewayClient {
         message: String,
         idempotencyKey: String,
         deliver: Bool,
-        attachments: [PreparedAttachment]) async throws -> Data
+        attachments: [PreparedAttachment],
+        sessionID: String? = nil,
+        uploadProgress: @escaping @Sendable (AttachmentUploadProgress) -> Void = { _ in }) async throws -> Data
     {
         var params: [String: Any?] = [
             "sessionKey": sessionKey,
@@ -583,12 +587,30 @@ public actor GatewayClient {
             "idempotencyKey": idempotencyKey,
             "deliver": deliver,
         ]
-        if !attachments.isEmpty { params["attachments"] = attachments.map(\.rpcValue) }
         do { if !self.connected { try await self.connect() } }
         catch { throw SendAttemptError.notSubmitted }
+        if try AttachmentProcessor.requiresUpload(message: message, attachments: attachments) {
+            guard self.uploadMethods.isSuperset(of: ["chat.upload.policy", "chat.upload.begin", "chat.upload.chunk", "chat.upload.cancel"]),
+                  let sessionID, !sessionID.isEmpty else { throw AttachmentError.uploadsUnavailable }
+            params["sessionId"] = sessionID
+            params["attachments"] = try await LargeAttachmentUpload.upload(sessionKey: sessionKey, sessionID: sessionID,
+                batchID: idempotencyKey, attachments: attachments, request: { method, params in
+                    try await self.request(method: method, params: params)
+                }, progress: uploadProgress)
+        } else if !attachments.isEmpty { params["attachments"] = try attachments.map { try $0.inlineRPCValue() } }
+        try Task.checkCancellation()
         do { return try await self.request(method: "chat.send", params: params) }
         catch let error as GatewayRequestError { throw error }
         catch { throw SendAttemptError.uncertain }
+    }
+
+    func attachmentSessionID(sessionKey: String) async throws -> String {
+        let data = try await request(method: "chat.history", params: ["sessionKey": sessionKey, "limit": 1])
+        struct HistoryIdentity: Decodable { let sessionId: String? }
+        guard let id = try decoder.decode(HistoryIdentity.self, from: data).sessionId, !id.isEmpty else {
+            throw AttachmentError.uploadsUnavailable
+        }
+        return id
     }
 
     /// Returns the progress card for `sessionKey`, or `nil` when none is set.

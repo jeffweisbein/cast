@@ -1061,7 +1061,7 @@ struct Composer: View, Equatable {
         .photosPicker(
             isPresented: self.$showingPhotos,
             selection: self.$selectedPhotos,
-            maxSelectionCount: 10,
+            maxSelectionCount: AttachmentLimits.maxFiles,
             matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .automatic)
         .onChange(of: self.selectedPhotos) { _, items in
@@ -1128,6 +1128,12 @@ struct Composer: View, Equatable {
 
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let progress = self.store.currentUploadProgress {
+                HStack {
+                    ProgressView("Uploading originals…", value: Double(progress.completedBytes), total: Double(max(1, progress.totalBytes)))
+                    Button("Cancel") { self.store.cancelCurrentUploads() }
+                }.font(.caption).padding(.horizontal, 8)
+            }
             #if os(iOS)
             if self.importingMedia {
                 ProgressView("Preparing photos and videos…").font(.caption).padding(.horizontal, 8)
@@ -1424,6 +1430,8 @@ struct Composer: View, Equatable {
     private func importPhotos(_ items: [PhotosPickerItem], target: ChatStore.AttachmentDraftTarget, importID: UUID) async {
         var prepared: [PreparedAttachment] = []
         var failures: [String] = []
+        var committed = false
+        defer { if !committed { prepared.forEach { $0.removeOwnedFile() } } }
         self.importingMedia = true
         defer { if self.mediaImportID == importID { self.importingMedia = false } }
         for (index, item) in items.enumerated() {
@@ -1433,9 +1441,11 @@ struct Composer: View, Equatable {
                     guard let video = try await item.loadTransferable(type: PickedVideoAttachment.self) else {
                         throw VideoAttachments.ImportError.invalidVideo
                     }
-                    try Task.checkCancellation()
-                    try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared + [video.attachment])
                     prepared.append(video.attachment)
+                    do {
+                        try Task.checkCancellation()
+                        try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared)
+                    } catch { prepared.removeLast().removeOwnedFile(); throw error }
                     continue
                 }
                 guard let data = try await item.loadTransferable(type: Data.self) else {
@@ -1457,7 +1467,7 @@ struct Composer: View, Equatable {
             }
         }
         guard !Task.isCancelled, self.store.attachmentDraftTarget == target else { return }
-        if !prepared.isEmpty { self.store.addAttachments(prepared) }
+        if !prepared.isEmpty { self.store.addAttachments(prepared); committed = true }
         if let first = failures.first {
             self.store.showError(failures.count == 1 ? first : "\(failures.count) selected items could not be attached. \(first)")
         }

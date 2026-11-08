@@ -1,3 +1,4 @@
+import CryptoKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -9,6 +10,9 @@ public struct PreparedAttachment: Identifiable, Sendable, Equatable, Codable {
     public let mimeType: String
     public let fileName: String
     public let data: Data
+    public let fileURL: URL?
+    public let fileSize: Int?
+    public let sha256: String?
 
     public init(id: UUID = UUID(), type: String, mimeType: String, fileName: String, data: Data) {
         self.id = id
@@ -16,18 +20,36 @@ public struct PreparedAttachment: Identifiable, Sendable, Equatable, Codable {
         self.mimeType = mimeType
         self.fileName = fileName
         self.data = data
+        self.fileURL = nil
+        self.fileSize = nil
+        self.sha256 = nil
     }
 
-    public var byteCount: Int { self.data.count }
-
-    public var rpcValue: [String: Any?] {
-        [
-            "type": self.type,
-            "mimeType": self.mimeType,
-            "fileName": self.fileName,
-            "content": self.data.base64EncodedString(),
-        ]
+    init(id: UUID, type: String, mimeType: String, fileName: String, fileURL: URL, size: Int, sha256: String) {
+        self.id = id; self.type = type; self.mimeType = mimeType; self.fileName = fileName
+        self.data = Data(); self.fileURL = fileURL; self.fileSize = size; self.sha256 = sha256
     }
+    public var byteCount: Int { self.fileSize ?? self.data.count }
+    /// Only deletes an application-owned immutable copy, never the source picked by the user.
+    func removeOwnedFile() {
+        guard let url = fileURL, url.deletingLastPathComponent().standardizedFileURL == AttachmentFiles.root.standardizedFileURL else { return }
+        AttachmentFiles.remove(url)
+    }
+
+
+    func inlineRPCValue() throws -> [String: Any?] {
+        guard byteCount <= AttachmentProcessor.maxFileBytes else { throw AttachmentError.invalidUpload }
+        let bytes: Data
+        if let fileURL {
+            let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true, values.fileSize == byteCount else { throw AttachmentError.unreadable }
+            bytes = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+            guard bytes.count == byteCount, SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == sha256 else { throw AttachmentError.unreadable }
+        } else { bytes = data }
+        return ["type": type, "mimeType": mimeType, "fileName": fileName, "content": bytes.base64EncodedString()]
+    }
+    public var rpcValue: [String: Any?] { get throws { try inlineRPCValue() } }
+
 }
 
 public enum AttachmentError: Error, LocalizedError, Sendable {
@@ -36,13 +58,23 @@ public enum AttachmentError: Error, LocalizedError, Sendable {
     case imageTooLarge(Int)
     case fileTooLarge(Int)
     case payloadTooLarge(Int)
+    case emptyFile
+    case tooManyFiles
+    case batchTooLarge
+    case uploadsUnavailable
+    case invalidUpload
 
     public var errorDescription: String? {
         switch self {
+        case .emptyFile: return "Remove empty files before sending a large attachment batch."
+        case .tooManyFiles: return "Attach up to 20 files per message."
+        case .batchTooLarge: return "Attachments must total 2 GB or less per message."
+        case .uploadsUnavailable: return "This gateway needs the large-upload update. Smaller attachments still work; your originals have not been compressed."
+        case .invalidUpload: return "The upload could not be verified. Retry to resume your original files."
         case .unreadable: return "Cast could not read that file."
         case .imageDecode: return "That image format could not be decoded."
         case let .imageTooLarge(bytes): return "The image is still too large after compression (\(Self.size(bytes)))."
-        case let .fileTooLarge(bytes): return "Files must be 16 MB or smaller (selected: \(Self.size(bytes)))."
+        case let .fileTooLarge(bytes): return "Files must be 500 MB or smaller (selected: \(Self.size(bytes)))."
         case let .payloadTooLarge(bytes): return "This message would exceed the gateway's 25 MB frame limit (\(Self.size(bytes)))."
         }
     }
@@ -76,8 +108,8 @@ public enum AttachmentProcessor {
             ?? (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
             ?? UTType(filenameExtension: url.pathExtension)
         if type?.conforms(to: .image) != true,
-           let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileBytes {
-            throw AttachmentError.fileTooLarge(size)
+           let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > inlineImageTargetBytes {
+            return try AttachmentFiles.copy(url: url, name: originalFileName ?? url.lastPathComponent, mimeType: type?.preferredMIMEType ?? "application/octet-stream")
         }
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw AttachmentError.unreadable }
         let fileName = originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -99,8 +131,25 @@ public enum AttachmentProcessor {
     }
 
     public static func validateFrame(message: String, attachments: [PreparedAttachment]) throws {
+        try validateBatch(attachments)
+        let textBytes = try frameByteCount(message: message, attachments: [])
+        guard textBytes <= maxFrameBytes - 65536 else { throw AttachmentError.payloadTooLarge(textBytes) }
+        // Large bodies travel as bounded chunks. Only their references enter chat.send.
+        if try requiresUpload(message: message, attachments: attachments) {
+            guard attachments.allSatisfy({ $0.byteCount > 0 }) else { throw AttachmentError.emptyFile }
+            return
+        }
         let encodedSize = try frameByteCount(message: message, attachments: attachments)
         guard encodedSize <= self.maxFrameBytes else { throw AttachmentError.payloadTooLarge(encodedSize) }
+    }
+
+    public static func validateBatch(_ attachments: [PreparedAttachment]) throws {
+        try AttachmentLimits.validate(sizes: attachments.map(\.byteCount))
+    }
+    public static func requiresUpload(message: String, attachments: [PreparedAttachment]) throws -> Bool {
+        if attachments.contains(where: { $0.byteCount > maxFileBytes }) { return true }
+        guard !attachments.isEmpty else { return false }
+        return try frameByteCount(message: message, attachments: attachments) > maxFrameBytes
     }
 
     // Count the exact JSON payload without constructing base64 on the UI actor.
@@ -119,7 +168,7 @@ public enum AttachmentProcessor {
             default: size += 1
             }
         }
-        return size + attachments.reduce(0) { $0 + (($1.data.count + 2) / 3) * 4 }
+        return size + attachments.reduce(0) { $0 + (($1.byteCount + 2) / 3) * 4 }
     }
 
     static func compressImage(_ input: Data, targetBytes: Int = inlineImageTargetBytes) throws -> Data {

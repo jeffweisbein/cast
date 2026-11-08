@@ -1,0 +1,13 @@
+# Original-quality attachment uploads
+
+Cast accepts up to 20 files, 500,000,000 bytes each, and 2,000,000,000 bytes per message. The app and share extension use the same count/size policy. Video imports validate a playable video track and keep original bytes. They never transcode automatically.
+
+Large sends require a gateway advertising `chat.upload.policy`, `chat.upload.begin`, `chat.upload.chunk`, and `chat.upload.cancel`. The gateway policy must enable version1 uploads. Existing gateways still receive small messages through the original inline path. Cast reports unsupported large uploads without sending an empty substitute or compressing the user's original.
+
+The receiver is a companion OpenClaw change, not part of Cast. Uploads use authenticated, session-incarnation-bound RPC with 1MiB chunks and SHA256 verification. Before uploading, Cast resolves the existing session's ID through `chat.history`, stores that ID in the outbox, and retains it across retries. New/unmaterialized sessions cannot stage files until a canonical session exists. Upload errors do not silently retarget another session or workspace.
+
+Original copies larger than the inline image target are file-backed in app-private Application Support. Staged batches convert remaining inline attachments into file-backed sources before outbox serialization. A small single file may be read into bounded memory for legacy inline delivery; a 500MB video is never encoded as one Data/base64 object. The UI shows byte progress and permits cancellation. Retry uses the original chat idempotency key and upload batch, resuming acknowledged offsets. Chat send ambiguity remains uncertain and is never automatically replayed.
+
+Local original copies have a 4GB aggregate admission budget plus 256MB free-space headroom. Admission reservations prevent parallel imports exceeding the budget; large copies/hash IO do not hold the admission lock. Acknowledged outbox sends and removed draft files delete only owned copies. Uncertain/failed sends keep originals. A lease is pinned to an outbox path before the outbox is committed; orphan cleanup only removes copies older than24hours with no extant outbox and no active in-process draft. User-selected sources are never deleted. Empty files remain usable inline, but must be removed from a staged batch because the staged receiver requires nonempty files.
+
+Verification separates native tests/builds, receiver replay, packaging, device installation, and actual Photos/device acceptance. See the task's existing Product Quality Graph occurrence and evidence; no native unit test establishes a live upload or user acceptance.

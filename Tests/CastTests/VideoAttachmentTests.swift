@@ -16,13 +16,13 @@ final class VideoAttachmentTests: XCTestCase {
         XCTAssertEqual(attachment.mimeType, "video/mp4")
         XCTAssertEqual(attachment.type, "file") // Existing gateway file transport, not an image block.
         XCTAssertEqual(attachment.data, input)
-        XCTAssertEqual(Data(base64Encoded: attachment.rpcValue["content"] as! String), input)
+        XCTAssertEqual(Data(base64Encoded: try attachment.rpcValue["content"] as! String), input)
         XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "See this clip", attachments: [attachment]))
         let tracks = try await AVURLAsset(url: fixture).loadTracks(withMediaType: .audio)
         XCTAssertEqual(tracks.count, 1)
     }
 
-    func testLargeVideoExportsBoundedPlayableCopyWithAudioWithoutChangingSource() async throws {
+    func testLargeVideoPreservesOriginalMovieOnDiskWithoutChangingSource() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -30,15 +30,18 @@ final class VideoAttachmentTests: XCTestCase {
         var padded = try Data(contentsOf: fixture)
         padded.append(Data(count: AttachmentProcessor.maxFileBytes + 1))
         try padded.write(to: source)
-        // Replays the existing synchronous path's size rejection before checking the new path.
-        XCTAssertThrowsError(try AttachmentProcessor.prepare(url: source))
         let attachment = try await AttachmentProcessor.prepareForSending(url: source)
         XCTAssertEqual(attachment.mimeType, "video/mp4")
         XCTAssertEqual(attachment.fileName, "Screen Recording.mp4")
-        XCTAssertLessThanOrEqual(attachment.byteCount, AttachmentProcessor.maxFileBytes)
+        defer { attachment.removeOwnedFile() }
+        XCTAssertEqual(attachment.byteCount, padded.count)
+        XCTAssertTrue(attachment.data.isEmpty)
+        XCTAssertNotNil(attachment.fileURL)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(attachment.fileURL)), padded)
+        XCTAssertEqual(attachment.sha256, try AttachmentFiles.digest(url: source).hash)
         XCTAssertEqual(try Data(contentsOf: source), padded)
         let output = dir.appendingPathComponent("export.mp4")
-        try attachment.data.write(to: output)
+        try FileManager.default.copyItem(at: XCTUnwrap(attachment.fileURL), to: output)
         let asset = AVURLAsset(url: output)
         let videos = try await asset.loadTracks(withMediaType: .video)
         let audio = try await asset.loadTracks(withMediaType: .audio)

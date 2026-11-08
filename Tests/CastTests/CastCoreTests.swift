@@ -1824,7 +1824,9 @@ final class CastCoreTests: XCTestCase {
         let safe = PreparedAttachment(type: "file", mimeType: "application/octet-stream", fileName: "safe.bin", data: Data(count: 1024))
         XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "hello", attachments: [safe]))
         let oversized = PreparedAttachment(type: "file", mimeType: "application/octet-stream", fileName: "large.bin", data: Data(count: 19 * 1024 * 1024))
-        XCTAssertThrowsError(try AttachmentProcessor.validateFrame(message: "hello", attachments: [oversized]))
+        XCTAssertGreaterThan(try AttachmentProcessor.frameByteCount(message: "hello", attachments: [oversized]), AttachmentProcessor.maxFrameBytes)
+        XCTAssertTrue(try AttachmentProcessor.requiresUpload(message: "hello", attachments: [oversized]))
+        XCTAssertNoThrow(try AttachmentProcessor.validateFrame(message: "hello", attachments: [oversized]))
     }
 
     func testImageProcessorProducesBoundedJPEG() throws {

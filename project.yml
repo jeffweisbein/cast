@@ -124,7 +124,7 @@ targets:
                 $item,
                 (
                   $item.attachments.@count > 0
-                  AND $item.attachments.@count <= 10
+                  AND $item.attachments.@count <= 20
                   AND SUBQUERY(
                     $item.attachments,
                     $att,
@@ -144,7 +144,7 @@ targets:
                 )
               ).@count == extensionItems.@count
               AND extensionItems.@count > 0
-              AND extensionItems.@count <= 10
+              AND extensionItems.@count <= 20
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
 
