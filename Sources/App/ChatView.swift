@@ -554,7 +554,11 @@ struct ChatView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
+            #if os(iOS)
+            ConnectionStatusView(store: store, showsWhenHealthy: false)
+            #else
             ConnectionStatusView(store: store)
+            #endif
             navigationControls
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }

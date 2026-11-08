@@ -2,12 +2,19 @@ import SwiftUI
 
 struct ConnectionStatusView: View {
     let store: ChatStore
+    var showsWhenHealthy = true
     @State private var expanded = false
     private var unconfirmed: Int {
         store.messages.filter { $0.localDeliveryState == .pending || $0.localDeliveryState == .uncertain || $0.localDeliveryState == .failed }.count
     }
     private var connected: Bool { if case .connected = store.connectionState { return true }; return false }
     var body: some View {
+        if showsWhenHealthy || !connected || unconfirmed > 0 {
+            statusContent
+        }
+    }
+
+    private var statusContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button { expanded.toggle() } label: {
                 HStack {
