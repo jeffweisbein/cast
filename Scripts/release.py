@@ -91,6 +91,9 @@ def main():
     settings = [f"MARKETING_VERSION={args.version}", f"CURRENT_PROJECT_VERSION={args.build}",
                 f"DEVELOPMENT_TEAM={args.team}", f"CAST_GIT_SHA={sha}",
                 f"CAST_UPDATE_FEED_URL={args.feed_url}", f"CAST_UPDATE_PUBLIC_KEY={args.update_public_key}"]
+    if args.platform == "ios":
+        # TestFlight/App Store tokens use production APNs, never the development sandbox.
+        settings.append("CAST_APNS_ENVIRONMENT=production")
     scheme = "Cast-iOS" if args.platform == "ios" else "Cast-macOS"
     common = ["xcodebuild", "-project", "Cast.xcodeproj", "-scheme", scheme,
               "-configuration", "Release", "-derivedDataPath", str(out / "DerivedData")]

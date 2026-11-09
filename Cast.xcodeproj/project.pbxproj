@@ -61,6 +61,7 @@
 		369AB5CB48036E5CF0BD293D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D839BA24C58B5F0BD038D00D /* Assets.xcassets */; };
 		36DE4C70D7FF8CBEA5915EBF /* Parakeet-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = F9AEAF78BC263CCA843CAB3E /* Parakeet-NOTICE.txt */; };
 		38DBBDED5F962D0CFE586745 /* MediaViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F990C9E78F87F0EA0661795A /* MediaViews.swift */; };
+		392A6E4E8873B529B3DB36F2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 7A0E25291A094DFA495B3144 /* PrivacyInfo.xcprivacy */; };
 		3A12DA8FD0EACF73222FDF5C /* TranscriptCacheWriteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 663FB546B3979653CF02CEFB /* TranscriptCacheWriteTests.swift */; };
 		3B98374F7A2A67A739AD74F7 /* ReliabilityFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E102353F6596EAF39E16E0 /* ReliabilityFixtureView.swift */; };
 		3C27D09CE0CB007223E9D655 /* OperationsSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 238460E5DCFD73A8A79F4D37 /* OperationsSearch.swift */; };
@@ -93,6 +94,7 @@
 		4FD9E88AE8D1CA95FA17C4D0 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD89DC5D954356D07B5821B4 /* DeviceIdentity.swift */; };
 		51B881B436295A122F946BE8 /* SessionDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A472F676AE21231ED88C3737 /* SessionDiagnostics.swift */; };
 		51F25E5F1806EAF4407E8B49 /* Sparkle-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 96972BC9EE36AFC10585FE9A /* Sparkle-LICENSE.txt */; };
+		54D1885A643861883FBF4286 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 1FF6D4820332323051542C60 /* PrivacyInfo.xcprivacy */; };
 		55878107BA9EE17459873012 /* LibraryScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F77CF88E9BF917F0E9DF3759 /* LibraryScannerTests.swift */; };
 		55E0936812175A3FF0E8AF2F /* AttachmentFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90996FF097745AAFC3338E29 /* AttachmentFiles.swift */; };
 		5639CAA5426E8B4A09F335DB /* AttentionItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = F765F02F2B5BD40C95EAA738 /* AttentionItems.swift */; };
@@ -247,6 +249,7 @@
 		ED7C3C5F3F07D777A133E364 /* Deliverables.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8550B0692132BD31F3A7E60 /* Deliverables.swift */; };
 		EFD9753A5BFDA54845396B8B /* GatewayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E07461744EF194BD8D446C96 /* GatewayClient.swift */; };
 		EFED62BE221E4C0A29EA22A2 /* UnreadLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5C3E50736995DED6165C5F /* UnreadLedger.swift */; };
+		F03980ABD17BAF7129CCF902 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 7A0E25291A094DFA495B3144 /* PrivacyInfo.xcprivacy */; };
 		F0FF210D7815A2DC740DD32C /* NotificationBulkActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D64A46CA41EBC2B4C5CAB59 /* NotificationBulkActionTests.swift */; };
 		F276668B495DC5FB4D09F632 /* DownloadCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657444EC03F8CF13F7582DB6 /* DownloadCenter.swift */; };
 		F4263E06BED00D24FA8A0113 /* ArtifactTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 187B413C58C0261AFDFACED9 /* ArtifactTransfer.swift */; };
@@ -322,6 +325,7 @@
 		1E22240219174AE588FB3948 /* ActivationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivationPolicyTests.swift; sourceTree = "<group>"; };
 		1E8574B6A2EA85EED13404BE /* QuestionRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionRequest.swift; sourceTree = "<group>"; };
 		1EDE14D3573B4F41377D4067 /* NotificationDeliveryLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDeliveryLedger.swift; sourceTree = "<group>"; };
+		1FF6D4820332323051542C60 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		203ED0D9E62BABE111C5C819 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		229728A15BE50B8112D8C97B /* AtomicJSONLedgerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AtomicJSONLedgerStore.swift; sourceTree = "<group>"; };
 		238460E5DCFD73A8A79F4D37 /* OperationsSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsSearch.swift; sourceTree = "<group>"; };
@@ -366,6 +370,7 @@
 		7187AB2ED45E44812BBB16EA /* CastApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastApp.swift; sourceTree = "<group>"; };
 		735FA9B3D69F23AA23EB2550 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		78A2627EF927F5F27CAA2243 /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
+		7A0E25291A094DFA495B3144 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		7A757A084ED139ADAABBD0EA /* NetworkImage-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "NetworkImage-LICENSE.txt"; sourceTree = "<group>"; };
 		7ADFA9395064D59D149E8B3A /* LiveHistoryReconcileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveHistoryReconcileTests.swift; sourceTree = "<group>"; };
 		7AF2FF652E629B1F3A8D92E3 /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
@@ -655,6 +660,7 @@
 		7B5F2384E6E15B271A7C66B2 /* ShareExtension */ = {
 			isa = PBXGroup;
 			children = (
+				1FF6D4820332323051542C60 /* PrivacyInfo.xcprivacy */,
 				A174F8A07A83352D1E9BCE72 /* ShareExtensionModel.swift */,
 				82EC55BC4E5B88003B894EC2 /* ShareExtensionView.swift */,
 				E801EB14581A4CE8DDDC512F /* ShareViewController.swift */,
@@ -714,6 +720,7 @@
 			isa = PBXGroup;
 			children = (
 				DED78540B47313ED4F3D8780 /* cast-desktop.py */,
+				7A0E25291A094DFA495B3144 /* PrivacyInfo.xcprivacy */,
 				EB97A55F985630313B29CE5F /* ThirdParty */,
 			);
 			path = Resources;
@@ -800,6 +807,7 @@
 			buildConfigurationList = 1CA91CDBB05410746C87C90D /* Build configuration list for PBXNativeTarget "CastShareExtension" */;
 			buildPhases = (
 				F6FF1581F4705DAB75355610 /* Sources */,
+				D1388EC3F4E9ECA53F8ACA08 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -890,6 +898,7 @@
 				C8A32B839FF1371295D077CC /* OpenClawKit-LICENSE.txt in Resources */,
 				42E5053F4F340BE649BB96A6 /* Parakeet-LICENSE.txt in Resources */,
 				A212BF244C26A76C34F2C356 /* Parakeet-NOTICE.txt in Resources */,
+				F03980ABD17BAF7129CCF902 /* PrivacyInfo.xcprivacy in Resources */,
 				C710836299B9D62ED445D04F /* Sparkle-LICENSE.txt in Resources */,
 				FCF33B578EF6CFF23DA97F9A /* cast-desktop.py in Resources */,
 				B7FAA11620A91739797895F2 /* swift-cmark-LICENSE.txt in Resources */,
@@ -910,10 +919,19 @@
 				5C226D2E4C739CEA01083AFE /* OpenClawKit-LICENSE.txt in Resources */,
 				2C75B42FFBD2E04ED14990CB /* Parakeet-LICENSE.txt in Resources */,
 				36DE4C70D7FF8CBEA5915EBF /* Parakeet-NOTICE.txt in Resources */,
+				392A6E4E8873B529B3DB36F2 /* PrivacyInfo.xcprivacy in Resources */,
 				51F25E5F1806EAF4407E8B49 /* Sparkle-LICENSE.txt in Resources */,
 				D5CF27C0FC7EB8D4DD50CB97 /* cast-desktop.py in Resources */,
 				15C6EB2A768CEF7B7C3969DA /* swift-cmark-LICENSE.txt in Resources */,
 				E773E707BB53EE7C6AD54672 /* swift-markdown-ui-LICENSE.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1388EC3F4E9ECA53F8ACA08 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				54D1885A643861883FBF4286 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1279,7 +1297,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CAST_GIT_SHA = 9b28cd002287;
+				CAST_GIT_SHA = development;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -1364,7 +1382,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CAST_GIT_SHA = 9b28cd002287;
+				CAST_GIT_SHA = development;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
