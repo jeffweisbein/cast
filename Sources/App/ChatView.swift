@@ -41,6 +41,7 @@ struct ChatView: View {
     @AppStorage("showAgentWork") private var showAgentWork = true
     // Transient view state (spec: no persistence for tool-run expansion).
     @State private var expandedRuns: Set<String> = []
+    @State private var showingSideChat = false
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
@@ -539,7 +540,21 @@ struct ChatView: View {
 
     var body: some View {
         self.transcriptAndComposer
+        .inspector(isPresented: $showingSideChat) {
+            if let chat = store.sideChat {
+                SideChatView(chat: chat) {
+                    store.closeSideChat()
+                    showingSideChat = false
+                }
+                .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
+            }
+        }
         .toolbar {
+            ToolbarItem {
+                if store.sideChat != nil {
+                    Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
+                }
+            }
             ToolbarItem { Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true } }
             ToolbarItem { Button("Secure entry", systemImage: "key") { showingSecretRequests = true } }
         }
@@ -768,6 +783,10 @@ struct ChatView: View {
                 agentID: self.store.selectedAgentID,
                 onOpenMedia: { url in self.previewURL = url },
                 onRetrySend: { messageID in self.store.retrySend(messageID: messageID) },
+                onAskAbout: store.supportsSideChat && allowsSending && store.sideChat == nil ? { text in
+                    store.openSideChat(context: text)
+                    showingSideChat = true
+                } : nil,
                 downloadAttachment: { [sessionKey = self.store.selectedSessionKey] attachment in
                     guard let sessionKey else { throw ArtifactTransferError.unavailable }
                     return try await self.store.fetchDeliverable(attachment.deliverable(sessionKey: sessionKey))

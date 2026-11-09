@@ -14,6 +14,11 @@ struct CodeBlockView: View {
                 Text(self.language ?? "code")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
+                if ["diff", "patch"].contains(self.language?.lowercased() ?? "") {
+                    let summary = DiffSummary(self.code)
+                    Text("+\(summary.additions)").foregroundStyle(.green)
+                    Text("−\(summary.deletions)").foregroundStyle(.red)
+                }
                 Spacer()
                 CopyBlockButton(
                     text: CopyPayload.code(self.code),
@@ -23,9 +28,24 @@ struct CodeBlockView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.4))
+            if ["diff", "patch"].contains(self.language?.lowercased() ?? "") {
+                let summary = DiffSummary(self.code)
+                if !summary.files.isEmpty {
+                    DisclosureGroup("\(summary.files.count) \(summary.files.count == 1 ? "file" : "files") in this diff") {
+                        ForEach(summary.files, id: \.self) { path in
+                            Label(path, systemImage: "doc.text")
+                                .font(.caption.monospaced()).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }.font(.caption).padding(10)
+                }
+            }
             ScrollView(.horizontal, showsIndicators: false) {
-                CodeHighlightText(code: self.code, language: self.language)
-                    .padding(12)
+                Group {
+                    if ["diff", "patch"].contains(self.language?.lowercased() ?? "") {
+                        DiffText(code: self.code)
+                    } else { CodeHighlightText(code: self.code, language: self.language) }
+                }.padding(12)
             }
         }
         .background(.quaternary.opacity(0.25))
@@ -55,7 +75,33 @@ struct CodeHighlightText: View {
             .codeTextColors(.theme(.xcode))
             .font(.system(size: 13))
             .lineSpacing(2.5)
+            .fixedSize(horizontal: true, vertical: true)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Keep every diff line visible, with semantic +/- cues as well as color.
+private struct DiffText: View {
+    let code: String
+    var body: some View {
+        Text(attributedCode)
+            .font(.system(size: 13, design: .monospaced))
+            .lineSpacing(3)
+            .fixedSize(horizontal: true, vertical: true)
+            .textSelection(.enabled)
+    }
+    private var attributedCode: AttributedString {
+        var result = AttributedString()
+        let lines = code.components(separatedBy: "\n")
+        for (index, line) in lines.enumerated() {
+            var text = AttributedString(line + (index < lines.count - 1 ? "\n" : ""))
+            if line.hasPrefix("+++") || line.hasPrefix("---") { text.foregroundColor = .secondary }
+            else if line.hasPrefix("+") { text.foregroundColor = .green }
+            else if line.hasPrefix("-") { text.foregroundColor = .red }
+            else if line.hasPrefix("@@") { text.foregroundColor = .accentColor }
+            result += text
+        }
+        return result
     }
 }

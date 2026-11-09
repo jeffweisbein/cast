@@ -491,6 +491,31 @@ public final class ChatStore {
 
     @ObservationIgnored
     private var client: GatewayClient?
+    public private(set) var sideChat: SideChat?
+
+    public var supportsSideChat: Bool {
+        gatewayMethods.isSuperset(of: ["sessions.create", "chat.send", "chat.history", "sessions.messages.subscribe"])
+    }
+
+    public func openSideChat(context: String) {
+        guard sideChat == nil, supportsSideChat, let key = selectedSessionKey else { return }
+        let workspaceID = profile.id
+        let gatewayURL = profile.gatewayURL
+        sideChat = SideChat(sourceSessionKey: key, context: context) { [weak self] method, params in
+            guard let self, self.profile.id == workspaceID, self.profile.gatewayURL == gatewayURL,
+                  let client = self.client, case .connected = self.connectionState else {
+                throw GatewayTimeoutError(context: "Reconnect to use side chat")
+            }
+            return try await client.request(method: method, params: params)
+        }
+    }
+
+    public func closeSideChat() {
+        guard let chat = sideChat, !chat.isBusy else { return }
+        sideChat = nil
+        Task { await chat.detach() }
+    }
+
     @ObservationIgnored
     private var turnActivity = AgentTurnActivityState()
     @ObservationIgnored
@@ -986,6 +1011,7 @@ public final class ChatStore {
         self.questionInbox = QuestionInbox()
         self.questionError = nil
         if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
+            self.sideChat = nil
             for task in sendTasks.values { task.cancel() }
             attachmentDrafts.values.flatMap { $0 }.forEach { $0.removeOwnedFile() }; unselectedAttachments.forEach { $0.removeOwnedFile() }
             attachmentDrafts.removeAll(); unselectedAttachments = []
@@ -1084,6 +1110,7 @@ public final class ChatStore {
             return
         }
         self.gatewayRestartDeadlineMs = nil
+        if let chat = self.sideChat { Task { await chat.reconnect() } }
         self.startTranscriptWatchdog()
         Task { await self.refreshSessions() }
         Task { await self.resubscribeAndReloadOpenSession() }
@@ -1158,6 +1185,7 @@ public final class ChatStore {
         await self.subscribeToSessions()
         await self.refreshSessions()
         await self.resubscribeAndReloadOpenSession()
+        await self.sideChat?.reconnect()
     }
 
     private func publishCachedAgentIdentityAndRefresh() {
@@ -2941,6 +2969,7 @@ public final class ChatStore {
     // MARK: - Events
 
     func handleEvent(_ event: EventFrame) {
+        self.sideChat?.receive(event)
         switch event.event {
         case "cast.hello":
             self.handleHello(event)

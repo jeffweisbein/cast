@@ -20,6 +20,7 @@ struct MessageGroupView: View, Equatable {
     let agentID: String
     let onOpenMedia: (URL) -> Void
     let onRetrySend: (String) -> Void
+    var onAskAbout: ((String) -> Void)? = nil
     var downloadAttachment: (@MainActor (ManagedChatAttachment) async throws -> URL)? = nil
     @State private var showsTime = false
     @State private var retryUncertainID: String?
@@ -34,6 +35,7 @@ struct MessageGroupView: View, Equatable {
             && lhs.gatewayURL == rhs.gatewayURL
             && lhs.workspaceID == rhs.workspaceID
             && lhs.agentID == rhs.agentID
+            && (lhs.onAskAbout != nil) == (rhs.onAskAbout != nil)
     }
 
     var body: some View {
@@ -90,6 +92,11 @@ struct MessageGroupView: View, Equatable {
                         MessageMediaView(message: message, onOpen: self.onOpenMedia, downloadAttachment: downloadAttachment)
                         if !message.text.isEmpty {
                             MarkdownBody(text: message.text).equatable()
+                            if let onAskAbout {
+                                Button("Ask in side chat", systemImage: "bubble.left.and.bubble.right") {
+                                    onAskAbout(message.text)
+                                }.font(.caption).buttonStyle(.borderless)
+                            }
                         }
                     }
                 }
@@ -195,16 +202,19 @@ struct ToolRunView: View, Equatable {
         VStack(alignment: .leading, spacing: 5) {
             Button(action: self.onToggle) {
                 HStack(spacing: 5) {
-                    Image(systemName: "gearshape.2")
+                    Image(systemName: "terminal")
                         .font(.system(size: 10))
                     Text(self.run.headline)
-                        .font(.caption2)
+                        .font(.caption)
                         .fontDesign(.rounded)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                         .rotationEffect(.degrees(self.isExpanded ? 90 : 0))
                 }
                 .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.quaternary.opacity(0.35), in: Capsule())
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -301,6 +311,8 @@ struct MarkdownBody: View, Equatable {
         let content = AssistantResponseContent(markdown: self.text)
         VStack(alignment: .leading, spacing: 4) {
             VStack(alignment: .leading, spacing: 10) {
+                let commits = CommitReference.references(in: self.text)
+                if !commits.isEmpty { CommitReferencesView(references: commits) }
                 ForEach(Array(content.blocks.enumerated()), id: \.0) { _, block in
                     switch block {
                     case let .markdown(markdown):
@@ -415,6 +427,12 @@ extension MarkdownUI.Theme {
         .link {
             ForegroundColor(.accentColor)
             UnderlineStyle(.single)
+        }
+        .code {
+            FontFamilyVariant(.monospaced)
+            FontSize(.em(0.9))
+            ForegroundColor(.accentColor)
+            BackgroundColor(Color.accentColor.opacity(0.08))
         }
         .codeBlock { configuration in
             CodeBlockView(language: configuration.language, code: configuration.content)
