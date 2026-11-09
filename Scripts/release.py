@@ -103,8 +103,12 @@ def main():
     else:
         archive = out / "Cast.xcarchive"
         destination = "generic/platform=iOS" if args.platform == "ios" else "generic/platform=macOS"
+        # iOS automatic signing chooses the archive identity. Forcing Distribution here
+        # conflicts with app/extension and SPM resource targets; exportArchive applies
+        # the App Store profile and distribution identity to the finished archive.
+        archive_signing = [] if args.platform == "ios" else [f"CODE_SIGN_IDENTITY={required}"]
         run(*common, "-destination", destination, "-archivePath", str(archive), "-allowProvisioningUpdates",
-            "archive", *settings, f"CODE_SIGN_IDENTITY={required}", "ENABLE_HARDENED_RUNTIME=YES")
+            "archive", *settings, *archive_signing, "ENABLE_HARDENED_RUNTIME=YES")
         options = {"method": "app-store-connect" if args.platform == "ios" else "developer-id",
                    "teamID": args.team, "signingStyle": "automatic"}
         if args.platform == "ios":
