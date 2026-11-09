@@ -85,6 +85,11 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CastGitSHA: "$(CAST_GIT_SHA)"
         UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         CastAPNSEnvironment: "$(CAST_APNS_ENVIRONMENT)"
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
