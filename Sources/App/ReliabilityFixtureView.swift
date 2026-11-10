@@ -11,10 +11,16 @@ struct ReliabilityFixtureView: View {
             else if mode == "needs" { NeedsYouView(store: store) }
             else { ChatView(store: store, allowsSending: false) }
         }.frame(width: 1000, height: 760).task {
-            store.installOfflineDiagnosticTranscript((0..<420).map { i in
-                ChatMessage(id: "fixture-\(i)", role: i % 2 == 0 ? "user" : "assistant",
-                    blocks: [ChatContentBlock(type: "text", text: i % 2 == 0 ? "Can you check the report \(i)?" : "Report \(i) is ready. The changes are verified locally; delivery still needs confirmation.", thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: Double(1_790_000_000_000 + i * 1000))
-            })
+            let messages: [ChatMessage] = (0..<420).map { i in
+                let isUser = i.isMultiple(of: 2)
+                let text = isUser ? "Can you check the report \(i)?"
+                    : "Report \(i) is ready. The changes are verified locally; delivery still needs confirmation."
+                let block = ChatContentBlock(type: "text", text: text, thinking: nil,
+                                             name: nil, mimeType: nil, fileName: nil)
+                return ChatMessage(id: "fixture-\(i)", role: isUser ? "user" : "assistant",
+                                   blocks: [block], timestamp: 1_790_000_000_000.0 + Double(i) * 1000)
+            }
+            store.installOfflineDiagnosticTranscript(messages)
             if mode == "downloads" {
                 for i in 0..<3 {
                     let item = Deliverable(id: "fixture-download-\(i)", sessionKey: "fixture", messageID: "m", title: ["Release notes.pdf", "QA packet.zip", "Session report.txt"][i], target: "artifact:fixture-\(i)", kind: "Document", sharedAt: nil)

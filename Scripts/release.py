@@ -91,6 +91,9 @@ def main():
     settings = [f"MARKETING_VERSION={args.version}", f"CURRENT_PROJECT_VERSION={args.build}",
                 f"DEVELOPMENT_TEAM={args.team}", f"CAST_GIT_SHA={sha}",
                 f"CAST_UPDATE_FEED_URL={args.feed_url}", f"CAST_UPDATE_PUBLIC_KEY={args.update_public_key}"]
+    if args.platform == "ios":
+        # TestFlight/App Store tokens use production APNs, never the development sandbox.
+        settings.append("CAST_APNS_ENVIRONMENT=production")
     scheme = "Cast-iOS" if args.platform == "ios" else "Cast-macOS"
     common = ["xcodebuild", "-project", "Cast.xcodeproj", "-scheme", scheme,
               "-configuration", "Release", "-derivedDataPath", str(out / "DerivedData")]
@@ -100,8 +103,12 @@ def main():
     else:
         archive = out / "Cast.xcarchive"
         destination = "generic/platform=iOS" if args.platform == "ios" else "generic/platform=macOS"
+        # iOS automatic signing chooses the archive identity. Forcing Distribution here
+        # conflicts with app/extension and SPM resource targets; exportArchive applies
+        # the App Store profile and distribution identity to the finished archive.
+        archive_signing = [] if args.platform == "ios" else [f"CODE_SIGN_IDENTITY={required}"]
         run(*common, "-destination", destination, "-archivePath", str(archive), "-allowProvisioningUpdates",
-            "archive", *settings, f"CODE_SIGN_IDENTITY={required}", "ENABLE_HARDENED_RUNTIME=YES")
+            "archive", *settings, *archive_signing, "ENABLE_HARDENED_RUNTIME=YES")
         options = {"method": "app-store-connect" if args.platform == "ios" else "developer-id",
                    "teamID": args.team, "signingStyle": "automatic"}
         if args.platform == "ios":

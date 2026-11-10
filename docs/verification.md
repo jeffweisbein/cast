@@ -36,3 +36,10 @@ PQG intake **284**, occurrence **286**, finding **598** tracks this improvement;
 | Invalid candidate/staged/destination package | Release preflight integration tests | Mocked package verifier rejects before replacement, or restores previous app on destination failure. Valid fixture install writes a distinct installation receipt without claiming user acceptance. |
 
 Full receipts: operator task evidence directory `cast-guard-replays-20261101`. Native Swift tests, real audio, UI-created session revocation and microphone hardware acceptance remain separately scoped checks in [local-dictation-and-desktop.md](local-dictation-and-desktop.md).
+
+
+## Video attachments
+
+The iOS **Photos & Videos** picker imports movies through a file representation, not an image preview. Files and the Photos share extension use the same preparation path. Videos at or below 16 MiB retain their original bytes; larger clips are exported to MP4 at 720p, then 480p if necessary, without modifying the source. The final per-file and aggregate frame limits still apply. A clip that cannot fit asks the user to trim it. Cancelled imports and imports whose workspace/conversation changed do not enter the current draft.
+
+`VideoAttachmentTests` uses a synthetic one-second MP4 with audio to verify byte-preserving RPC payloads, a playable bounded export with audio, source preservation, corrupt media rejection and cancellation. The large-input test pads the valid movie beyond the transport limit; it exercises export and limits, not real-world long-video quality. Physical Photos/iCloud selection and end-to-end agent interpretation remain separate acceptance checks.

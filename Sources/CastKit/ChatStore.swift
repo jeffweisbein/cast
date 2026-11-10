@@ -11,13 +11,13 @@ struct PendingEcho: Sendable {
 }
 
 /// The exact chat.send inputs a bubble needs to resend itself. Kept off the message row
-/// because prepared attachment payloads (up to ~24 MB of base64 source bytes) are far too
-/// heavy to persist per cached message; the row's echo text and placeholders cannot stand
-/// in for them.
+/// because attachment bytes/references belong to the workspace outbox, not cached message
+/// rows. Echo text and placeholders cannot stand in for the original immutable payload.
 struct PendingSendContext: Sendable, Codable, Equatable {
     let text: String
-    let attachments: [PreparedAttachment]
+    var attachments: [PreparedAttachment]
     let deliver: Bool
+    var sessionID: String? = nil
 }
 
 /// Tracks locally accepted sends separately from gateway-confirmed runs. A history page can
@@ -418,6 +418,18 @@ public final class ChatStore {
     public private(set) var numericUnreadCount = 0
     public private(set) var unreadCountsBySession: [String: Int] = [:]
     public private(set) var notificationRecords: [NotificationDeliveryRecord] = []
+    /// Updated by the workspace scene, not by a socket event or selected-session cache.
+    public var isNotificationContextVisible = true
+    public private(set) var remotePushEnabled = false
+    public private(set) var remotePushReady = false
+    public private(set) var remotePushManagedElsewhere = false
+    @ObservationIgnored private var remotePushTakeoverRequested = false
+    // Transport ownership is stable; sync/readiness failures never enable a second sender.
+    @ObservationIgnored var usesRemoteCompletionDelivery = NativePushEnvironment.usesAPNs
+    public private(set) var remotePushStatus = "Remote notifications are off."
+    @ObservationIgnored private var remotePushSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var remotePushRevision = 0
+    @ObservationIgnored private var remotePushOptInRevision = 0
     public private(set) var automationRuns: [CronRun] = []
     public private(set) var automationRunsState: AutomationRunsState = .idle
     public private(set) var mutedSessionKeys: Set<String> = []
@@ -479,6 +491,31 @@ public final class ChatStore {
 
     @ObservationIgnored
     private var client: GatewayClient?
+    public private(set) var sideChat: SideChat?
+
+    public var supportsSideChat: Bool {
+        gatewayMethods.isSuperset(of: ["sessions.create", "chat.send", "chat.history", "sessions.messages.subscribe"])
+    }
+
+    public func openSideChat(context: String) {
+        guard sideChat == nil, supportsSideChat, let key = selectedSessionKey else { return }
+        let workspaceID = profile.id
+        let gatewayURL = profile.gatewayURL
+        sideChat = SideChat(sourceSessionKey: key, context: context) { [weak self] method, params in
+            guard let self, self.profile.id == workspaceID, self.profile.gatewayURL == gatewayURL,
+                  let client = self.client, case .connected = self.connectionState else {
+                throw GatewayTimeoutError(context: "Reconnect to use side chat")
+            }
+            return try await client.request(method: method, params: params)
+        }
+    }
+
+    public func closeSideChat() {
+        guard let chat = sideChat, !chat.isBusy else { return }
+        sideChat = nil
+        Task { await chat.detach() }
+    }
+
     @ObservationIgnored
     private var turnActivity = AgentTurnActivityState()
     @ObservationIgnored
@@ -487,6 +524,15 @@ public final class ChatStore {
     /// accepts the send; a failed entry stays so retry can resend the identical payload.
     @ObservationIgnored
     private var sendContexts: [String: PendingSendContext] = [:]
+    @ObservationIgnored private var sendTasks: [String: Task<Void, Never>] = [:]
+    public private(set) var uploadProgress: [String: AttachmentUploadProgress] = [:]
+    @ObservationIgnored private var uploadSessionKeys: [String: String] = [:]
+    public var currentUploadProgress: AttachmentUploadProgress? {
+        uploadProgress.first { uploadSessionKeys[$0.key] == selectedSessionKey }?.value
+    }
+    public func cancelCurrentUploads() {
+        for (id, key) in uploadSessionKeys where key == selectedSessionKey { sendTasks[id]?.cancel() }
+    }
     @ObservationIgnored
     private var transcriptSnapshots = TranscriptSnapshotStore()
     @ObservationIgnored
@@ -609,6 +655,7 @@ public final class ChatStore {
         operationsLedgerRoot: URL? = nil)
     {
         self.profile = profile
+        self.remotePushEnabled = UserDefaults.standard.bool(forKey: "cast.push.enabled.\(profile.id)")
         self.cache = TranscriptCache(workspaceID: profile.id, root: transcriptCacheRoot)
         let operationsRoot: URL
         if let operationsLedgerRoot {
@@ -964,6 +1011,9 @@ public final class ChatStore {
         self.questionInbox = QuestionInbox()
         self.questionError = nil
         if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
+            self.sideChat = nil
+            for task in sendTasks.values { task.cancel() }
+            attachmentDrafts.values.flatMap { $0 }.forEach { $0.removeOwnedFile() }; unselectedAttachments.forEach { $0.removeOwnedFile() }
             attachmentDrafts.removeAll(); unselectedAttachments = []
             downloads.reset()
             approvals = []; approvalActivity = [:]; approvalRefreshError = nil; approvalRevision &+= 1
@@ -1060,6 +1110,7 @@ public final class ChatStore {
             return
         }
         self.gatewayRestartDeadlineMs = nil
+        if let chat = self.sideChat { Task { await chat.reconnect() } }
         self.startTranscriptWatchdog()
         Task { await self.refreshSessions() }
         Task { await self.resubscribeAndReloadOpenSession() }
@@ -1068,6 +1119,7 @@ public final class ChatStore {
         Task { await self.refreshSecretRequests() }
         Task { await self.refreshQuestions() }
         Task { await self.subscribeToSessions() }
+        self.scheduleRemotePushSync()
         #if DEBUG
         self.startIsolatedSendSmokeIfRequested()
         self.startTokenRotationSmokeIfRequested()
@@ -1133,6 +1185,7 @@ public final class ChatStore {
         await self.subscribeToSessions()
         await self.refreshSessions()
         await self.resubscribeAndReloadOpenSession()
+        await self.sideChat?.reconnect()
     }
 
     private func publishCachedAgentIdentityAndRefresh() {
@@ -2107,6 +2160,10 @@ public final class ChatStore {
         guard !trimmed.isEmpty || !outgoing.isEmpty, let client = self.client, let key = self.selectedSessionKey else { return false }
         do {
             try AttachmentProcessor.validateFrame(message: trimmed, attachments: outgoing)
+            if try AttachmentProcessor.requiresUpload(message: trimmed, attachments: outgoing),
+               !gatewayMethods.isSuperset(of: ["chat.upload.policy", "chat.upload.begin", "chat.upload.chunk", "chat.upload.cancel"]) {
+                throw AttachmentError.uploadsUnavailable
+            }
         } catch {
             self.lastError = error.localizedDescription
             return false
@@ -2138,7 +2195,8 @@ public final class ChatStore {
         self.sendContexts[idempotencyKey] = PendingSendContext(
             text: trimmed,
             attachments: outgoing,
-            deliver: deliver ?? self.deliverExternally)
+            deliver: deliver ?? self.deliverExternally,
+            sessionID: sessions.first(where: { $0.key == key })?.modelInfo?.sessionId)
         self.dispatchSend(
             client: client,
             sessionKey: key,
@@ -2198,10 +2256,13 @@ public final class ChatStore {
         idempotencyKey: String,
         completion: ((Bool) -> Void)? = nil)
     {
-        guard let context = self.sendContexts[idempotencyKey] else { return }
+        guard var context = self.sendContexts[idempotencyKey] else { return }
         let optimisticMessages = self.messages
         let optimisticHistoryIsComplete = self.completeHistorySessionKeys.contains(sessionKey)
-        Task {
+        guard sendTasks[idempotencyKey] == nil else { return }
+        uploadSessionKeys[idempotencyKey] = sessionKey
+        sendTasks[idempotencyKey] = Task {
+            defer { sendTasks[idempotencyKey] = nil; uploadProgress[idempotencyKey] = nil; uploadSessionKeys[idempotencyKey] = nil }
             // Persist the image + caption bubble before the network request so an app
             // background/termination or a slow gateway cannot make the sent message vanish.
             await self.cache.save(
@@ -2210,15 +2271,32 @@ public final class ChatStore {
                 historyIsComplete: optimisticHistoryIsComplete)
             var persisted = false
             do {
+                try Task.checkCancellation()
+                if try AttachmentProcessor.requiresUpload(message: context.text, attachments: context.attachments) {
+                    let originals = context.attachments
+                    let backing = Task.detached(priority: .userInitiated) { try AttachmentFiles.diskBacked(originals) }
+                    context.attachments = try await withTaskCancellationHandler { try await backing.value } onCancel: { backing.cancel() }
+                    self.sendContexts[idempotencyKey] = context
+                    try Task.checkCancellation()
+                }
                 try await self.sendOutbox.save(StoredSend(sessionKey: sessionKey, idempotencyKey: idempotencyKey,
                     context: context, createdAt: Date()))
                 persisted = true
+                if context.sessionID == nil, try AttachmentProcessor.requiresUpload(message: context.text, attachments: context.attachments) {
+                    let resolved = try await client.attachmentSessionID(sessionKey: sessionKey)
+                    context = try await self.sendOutbox.bindSessionID(resolved, key: idempotencyKey, sessionKey: sessionKey).context
+                    self.sendContexts[idempotencyKey] = context
+                    try Task.checkCancellation()
+                }
                 let data = try await client.sendChat(
                     sessionKey: sessionKey,
                     message: context.text,
                     idempotencyKey: idempotencyKey,
                     deliver: context.deliver,
-                    attachments: context.attachments)
+                    attachments: context.attachments, sessionID: context.sessionID,
+                    uploadProgress: { [weak self] progress in
+                        Task { @MainActor in self?.uploadProgress[idempotencyKey] = progress }
+                    })
                 self.pendingModelChanges.removeValue(forKey: sessionKey)
                 if let response = try? self.decoder.decode(ChatSendResponse.self, from: data),
                    let runId = response.runId,
@@ -2239,7 +2317,7 @@ public final class ChatStore {
                 self.setLocalDeliveryState(state, messageID: echoID, sessionKey: sessionKey)
                 self.lastError = state == .uncertain
                     ? "Delivery is unconfirmed. Cast will refresh the conversation when it reconnects. It will not automatically resend."
-                    : (persisted ? GatewayFailurePolicy.messageSendAlert : "Couldn’t safely save this send on your device. This attempt was not submitted. Free some disk space and retry.")
+                    : (error is AttachmentError || error is CancellationError ? (error is CancellationError ? "Upload cancelled. Your original files are kept; use Retry when ready." : error.localizedDescription) : (persisted ? GatewayFailurePolicy.messageSendAlert : "Couldn’t safely save this send on your device. This attempt was not submitted. Free some disk space and retry."))
                 completion?(false)
             }
         }
@@ -2301,11 +2379,17 @@ public final class ChatStore {
         AttachmentDraftTarget(workspaceID: profile.id, gatewayURL: profile.gatewayURL, sessionKey: selectedSessionKey)
     }
     func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) {
-        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else { return }
+        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else {
+            if case let .success(attachment) = result { attachment.removeOwnedFile() }; return
+        }
         switch result {
         case let .success(attachment):
+            let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
+            do { try AttachmentProcessor.validateBatch(existing + [attachment]) }
+            catch { attachment.removeOwnedFile(); if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }; return }
             if let key = target.sessionKey { attachmentDrafts[key, default: []].append(attachment) }
             else if selectedSessionKey == nil { unselectedAttachments.append(attachment) }
+            else { attachment.removeOwnedFile() }
         case let .failure(error):
             if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }
         }
@@ -2315,7 +2399,7 @@ public final class ChatStore {
     }
     func addAttachment(url: URL, target: AttachmentDraftTarget) {
         Task {
-            let result = await Task.detached { try AttachmentProcessor.prepare(url: url) }.result
+            let result = await Task.detached { try await AttachmentProcessor.prepareForSending(url: url) }.result
             finishAttachmentPreparation(result, target: target)
         }
     }
@@ -2334,7 +2418,8 @@ public final class ChatStore {
     }
 
     public func addAttachments(_ attachments: [PreparedAttachment]) {
-        self.pendingAttachments.append(contentsOf: attachments)
+        do { try AttachmentProcessor.validateBatch(self.pendingAttachments + attachments); self.pendingAttachments.append(contentsOf: attachments) }
+        catch { attachments.forEach { $0.removeOwnedFile() }; self.lastError = error.localizedDescription }
     }
 
     // MARK: - Drafts
@@ -2361,6 +2446,7 @@ public final class ChatStore {
     }
 
     public func removeAttachment(id: UUID) {
+        self.pendingAttachments.filter { $0.id == id }.forEach { $0.removeOwnedFile() }
         self.pendingAttachments.removeAll { $0.id == id }
     }
 
@@ -2683,6 +2769,7 @@ public final class ChatStore {
             try self.sidebarPreferencesStore.save(preferences)
             self.sidebarPreferences = preferences
             self.publishOperationsState()
+            self.scheduleRemotePushSync()
             return true
         } catch {
             self.showError("Couldn’t save sidebar preferences. Please try again.")
@@ -2703,6 +2790,7 @@ public final class ChatStore {
         self.mutedSessionKeys = self.muteLedger.mutedSessionKeys
         let mutes = self.muteLedger
         Task { await self.operationsPersistence.save(mutes: mutes) }
+        self.scheduleRemotePushSync()
     }
 
     public func toggleSessionMuted(_ sessionKey: String) {
@@ -2881,6 +2969,7 @@ public final class ChatStore {
     // MARK: - Events
 
     func handleEvent(_ event: EventFrame) {
+        self.sideChat?.receive(event)
         switch event.event {
         case "cast.hello":
             self.handleHello(event)
@@ -2967,6 +3056,7 @@ public final class ChatStore {
     }
 
     private func handleChatEvent(_ event: EventFrame) {
+        self.recordTaskCompletion(event)
         guard let payload = self.decodePayload(event, as: ChatEventPayload.self), let key = self.selectedSessionKey else { return }
         let ownsRun = payload.runId.map { self.turnActivity.contains($0) } ?? false
         guard SessionKeyMatcher.matches(payload.sessionKey, key) || ownsRun else { return }
@@ -3084,7 +3174,7 @@ public final class ChatStore {
             ? decoded
             : decoded.identifiedByContent()
         if !message.isUser,
-           !SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey)
+           !(self.isNotificationContextVisible && SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey))
         {
             self.recordUnreadReply(
                 sessionKey: eventSessionKey,
@@ -3336,6 +3426,7 @@ public final class ChatStore {
     private func handleHello(_ event: EventFrame) {
         gatewayMethodsKnown = true
         self.gatewayMethods = Set(event.payload?["features"]?["methods"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        self.scheduleRemotePushSync()
         if !self.gatewayMethods.contains("sessions.compact") { self.contextCompactionOfferKey = nil }
         self.gatewayVersion = event.payload?["server"]?["version"]?.stringValue
         self.modelCatalog = []
@@ -3425,7 +3516,7 @@ public final class ChatStore {
     private func reconcileOperations(with sessions: [SessionRow]) {
         for session in sessions {
             let watermark = Self.operationWatermark(session.updatedAt)
-            if SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
+            if self.isNotificationContextVisible && SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
                 _ = self.unreadLedger.clearOnOpen(
                     workspaceID: self.profile.id,
                     sessionKey: session.key,
@@ -3488,13 +3579,42 @@ public final class ChatStore {
             watermark: watermark) == .incremented
         else { return }
 
+        self.publishOperationsState()
+    }
+
+    private func recordTaskCompletion(_ event: EventFrame) {
+        // Message events include progress/commentary. Only a non-yielded terminal chat
+        // result is a completion; a reconnect/history snapshot must never manufacture one.
+        guard let payload = event.payload,
+              payload["state"]?.stringValue == "final",
+              payload["yielded"]?.boolValue != true,
+              payload["transcriptOnly"]?.boolValue != true,
+              payload["replay"]?.boolValue != true,
+              payload["replayed"]?.boolValue != true,
+              let runID = payload["runId"]?.stringValue, !runID.isEmpty,
+              let sessionKey = payload["sessionKey"]?.stringValue, !sessionKey.isEmpty
+        else { return }
+        let normalizedKey = sessionKey.lowercased()
+        guard !normalizedKey.contains(":cron:"),
+              !(normalizedKey.split(separator: ":").last?.hasPrefix("dreaming-") ?? false),
+              !normalizedKey.contains(":incognito-") else { return }
+        if let message = payload["message"], message["role"]?.stringValue == "assistant" {
+            let artifactModel = ["delivery-mirror", "gateway-injected"].contains(message["model"]?.stringValue ?? "")
+            let mirror = ["channel-final", "channel-final-suppressed", "message-tool-source-reply", "cron-direct-delivery-context"]
+                .contains(message["openclawDeliveryMirror"]?["kind"]?.stringValue ?? "")
+            guard !(message["provider"]?.stringValue == "openclaw" && artifactModel), !mirror else { return }
+        }
+        // iOS always assigns delivery to APNs, including while registration/status
+        // sync is pending. A transient failure cannot open a competing local sender.
+        if self.usesRemoteCompletionDelivery { return }
+        let eventID = "completion:\(runID)"
         let dedupeID = "\(self.profile.id):\(eventID)"
         let now = Date()
         let linkage = NotificationLinkage(
             workspaceID: self.profile.id,
             sessionKey: sessionKey,
             sourceEventID: eventID,
-            messageID: eventID)
+            messageID: nil)
         guard self.notificationLedger.observe(
             dedupeID: dedupeID,
             linkage: linkage,
@@ -3509,15 +3629,22 @@ public final class ChatStore {
         // tests can observe the "muted" suppression reason.
         let muted = self.muteLedger.isMuted(sessionKey: sessionKey)
         let hidden = self.isSessionHidden(sessionKey)
-        let shouldDeliverNatively = !muted && !hidden
+        let visible = self.isNotificationContextVisible
+            && SessionKeyMatcher.matches(sessionKey, self.selectedSessionKey)
+        #if os(iOS)
+        let enabled = self.remotePushEnabled
+        #else
+        let enabled = true
+        #endif
+        let shouldDeliverNatively = enabled && !muted && !hidden && !visible
             && ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
         if shouldDeliverNatively {
             _ = self.notificationLedger.markEligible(
                 dedupeID: dedupeID,
                 at: now,
-                detail: "unread-agent-reply")
+                detail: "task-completed")
         } else {
-            let reason = hidden ? "hidden" : (muted ? "muted" : "test-host")
+            let reason = !enabled ? "notifications-off" : (hidden ? "hidden" : (muted ? "muted" : (visible ? "visible-session" : "test-host")))
             _ = self.notificationLedger.markSuppressed(
                 dedupeID: dedupeID,
                 at: now,
@@ -3526,11 +3653,10 @@ public final class ChatStore {
         self.publishOperationsState()
         guard shouldDeliverNatively else { return }
 
-        let row = self.sessions.first(where: { $0.key == sessionKey })
-        let title = row.map {
-            SidebarGrouper.displayTitle(for: $0, mainSessionKey: self.mainSessionKey)
-        } ?? "Agent reply"
-        let body = SidebarGrouper.cleanPreview(row?.lastMessagePreview) ?? "A new reply needs your attention."
+        // Lock-screen copy is intentionally generic: neither session titles nor previews
+        // should expose private work to someone holding a locked device.
+        let title = "Task complete"
+        let body = "Open Cast to view the result."
         Task {
             let outcome = await NativeNotificationDelivery.shared.deliver(
                 identifier: dedupeID,
@@ -3605,6 +3731,161 @@ public final class ChatStore {
 
     public func requestNotificationAuthorization() async -> Bool {
         await NativeNotificationDelivery.shared.requestAuthorization()
+    }
+
+    // MARK: - Remote task completion notifications
+
+    public func setRemotePushEnabled(_ enabled: Bool) async {
+        self.remotePushOptInRevision += 1
+        let revision = self.remotePushOptInRevision
+        if enabled {
+            guard await self.requestNotificationAuthorization() else {
+                self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
+                return
+            }
+        }
+        guard revision == self.remotePushOptInRevision else { return }
+        self.remotePushEnabled = enabled
+        self.remotePushTakeoverRequested = enabled
+        if !enabled { self.remotePushReady = false }
+        UserDefaults.standard.set(enabled, forKey: "cast.push.enabled.\(self.profile.id)")
+        if enabled { await NativePushRegistration.shared.registerIfAuthorized() }
+        self.scheduleRemotePushSync()
+    }
+
+    /// Serial preference sync: a later mute/opt-out can never be overtaken by an earlier
+    /// registration request. Offline changes remain pending and are retried at reconnect.
+    public func scheduleRemotePushSync() {
+        #if os(iOS)
+        self.remotePushRevision += 1
+        guard self.remotePushSyncTask == nil,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        self.remotePushSyncTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let revision = self.remotePushRevision
+                await self.syncRemotePush()
+                if revision == self.remotePushRevision { break }
+            }
+            self.remotePushSyncTask = nil
+        }
+        #endif
+    }
+
+    private var remotePushBindingKey: String { "cast.push.binding.\(self.profile.id)" }
+
+    public func acceptsRemoteNotification(_ destination: NativeNotificationDestination) -> Bool {
+        guard destination.workspaceID == self.profile.id,
+              let gatewayID = destination.gatewayDeviceID,
+              let binding = UserDefaults.standard.dictionary(forKey: self.remotePushBindingKey),
+              binding["url"] as? String == self.profile.gatewayURL.absoluteString,
+              binding["gatewayDeviceID"] as? String == gatewayID else { return false }
+        return true
+    }
+
+    /// Records an actual APNs delivery (or a foreground delivery decision) in the same
+    /// persisted per-run ledger used by local events. Replayed socket finals stay silent.
+    @discardableResult
+    public func observeRemoteCompletion(_ destination: NativeNotificationDestination, presenting: Bool) -> Bool {
+        guard self.acceptsRemoteNotification(destination), let runID = destination.runID else { return false }
+        let eventID = "completion:\(runID)"
+        let dedupeID = "\(self.profile.id):\(eventID)"
+        let now = Date()
+        guard self.notificationLedger.observe(dedupeID: dedupeID,
+            linkage: NotificationLinkage(workspaceID: self.profile.id, sessionKey: destination.sessionKey, sourceEventID: eventID),
+            at: now) == .inserted else { return false }
+        let visible = self.isNotificationContextVisible && SessionKeyMatcher.matches(destination.sessionKey, self.selectedSessionKey)
+        let suppressed = presenting && (!self.remotePushEnabled || self.isSessionMuted(destination.sessionKey)
+            || self.isSessionHidden(destination.sessionKey) || visible)
+        if suppressed {
+            _ = self.notificationLedger.markSuppressed(dedupeID: dedupeID, at: now, reason: "foreground-policy")
+        } else {
+            _ = self.notificationLedger.markEligible(dedupeID: dedupeID, at: now, detail: "remote-task-completed")
+            _ = self.notificationLedger.markDelivered(dedupeID: dedupeID, at: now, detail: "remote-notification")
+        }
+        self.publishOperationsState()
+        return !suppressed
+    }
+
+    private func syncRemotePush() async {
+        self.remotePushReady = false
+        let takeover = self.remotePushTakeoverRequested
+        self.remotePushTakeoverRequested = false
+        guard let client = self.client, case .connected = self.connectionState else {
+            self.remotePushStatus = self.remotePushEnabled ? "Waiting for a connection to enable alerts." : "Notifications are off here. Reconnect to stop any remote alerts."
+            return
+        }
+        guard self.gatewayMethods.isSuperset(of: ["push.native.register", "push.native.unregister", "push.native.status"]) else {
+            self.remotePushStatus = "This workspace needs an update before it can send remote alerts."
+            return
+        }
+        do {
+            let generation = self.clientGeneration
+            let initialData = try await client.request(method: "push.native.status", params: [:])
+            let initial = try self.decoder.decode(NativePushStatus.self, from: initialData)
+            guard generation == self.clientGeneration else { return }
+            self.remotePushManagedElsewhere = initial.isManagedElsewhere(workspaceID: self.profile.id)
+            if self.remotePushManagedElsewhere && !(takeover && self.remotePushEnabled) {
+                self.remotePushStatus = "Task alerts are managed by another workspace on this device."
+                return
+            }
+            if !self.remotePushEnabled {
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
+                self.remotePushStatus = "Remote notifications are off."
+                return
+            }
+            guard await NativeNotificationDelivery.shared.isAuthorized() else {
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
+                self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
+                return
+            }
+            let registration = NativePushRegistration.shared
+            guard let token = registration.token, let environment = registration.environment,
+                  let topic = Bundle.main.bundleIdentifier else {
+                self.remotePushStatus = registration.failureMessage ?? "Waiting for Apple notification registration."
+                return
+            }
+            let excluded = Set(self.mutedSessionKeys).union(self.sidebarPreferences.hiddenKeys).sorted()
+            guard excluded.count <= 1000 else {
+                _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
+                self.remotePushStatus = "Too many muted chats to safely enable remote notifications."
+                return
+            }
+            var parameters: [String: Any] = [
+                "token": token, "topic": topic, "environment": environment,
+                "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
+            ]
+            if takeover, let previous = initial.workspaceId, previous != self.profile.id {
+                parameters["replaceWorkspaceId"] = previous
+            }
+            let registeredData = try await client.request(method: "push.native.register", params: parameters)
+            let registered = try self.decoder.decode(NativePushRegistrationResult.self, from: registeredData)
+            guard generation == self.clientGeneration else { return }
+            if registered.registered {
+                // Register itself is authenticated proof. Preserve routing even if the
+                // subsequent readiness/status request is interrupted by suspension.
+                UserDefaults.standard.set([
+                    "url": self.profile.gatewayURL.absoluteString,
+                    "gatewayDeviceID": registered.gatewayDeviceId,
+                ], forKey: self.remotePushBindingKey)
+            }
+            let data = try await client.request(method: "push.native.status", params: [:])
+            let status = try self.decoder.decode(NativePushStatus.self, from: data)
+            guard generation == self.clientGeneration else { return }
+            UserDefaults.standard.set([
+                "url": self.profile.gatewayURL.absoluteString,
+                "gatewayDeviceID": status.gatewayDeviceId,
+            ], forKey: self.remotePushBindingKey)
+            self.remotePushManagedElsewhere = status.isManagedElsewhere(workspaceID: self.profile.id)
+            self.remotePushReady = status.registered && status.workspaceId == self.profile.id && status.enabled && status.configured
+            self.remotePushStatus = self.remotePushManagedElsewhere
+                ? "Task alerts are managed by another workspace on this device."
+                : self.remotePushReady
+                ? "Task alerts are ready, even when Cast is closed."
+                : "This workspace still needs notification delivery configured."
+        } catch {
+            self.remotePushStatus = "Notification settings could not sync. Reconnect to try again."
+        }
     }
 
     // MARK: - Progress card

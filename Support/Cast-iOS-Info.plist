@@ -29,6 +29,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CastAPNSEnvironment</key>
+	<string>$(CAST_APNS_ENVIRONMENT)</string>
 	<key>CastGitSHA</key>
 	<string>$(CAST_GIT_SHA)</string>
 	<key>NSAppTransportSecurity</key>
@@ -46,5 +48,12 @@
 	<string>Cast turns speech into editable drafts using on-device recognition.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 </dict>
 </plist>

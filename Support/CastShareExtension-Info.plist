@@ -30,7 +30,7 @@
   $item,
   (
     $item.attachments.@count &gt; 0
-    AND $item.attachments.@count &lt;= 10
+    AND $item.attachments.@count &lt;= 20
     AND SUBQUERY(
       $item.attachments,
       $att,
@@ -48,7 +48,7 @@
     $item.attachments.@count == 0
     AND $item.attributedContentText.length &gt; 0
   )
-).@count == extensionItems.@count AND extensionItems.@count &gt; 0 AND extensionItems.@count &lt;= 10</string>
+).@count == extensionItems.@count AND extensionItems.@count &gt; 0 AND extensionItems.@count &lt;= 20</string>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.share-services</string>

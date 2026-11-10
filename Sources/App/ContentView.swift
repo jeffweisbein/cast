@@ -106,6 +106,7 @@ struct ContentView: View {
 
 struct UnconfiguredWorkspaceView: View {
     let startSetup: () -> Void
+    @State private var showingDemo = false
 
     var body: some View {
         ContentUnavailableView {
@@ -115,7 +116,10 @@ struct UnconfiguredWorkspaceView: View {
         } actions: {
             Button("Set Up Cast", action: self.startSetup)
                 .buttonStyle(.borderedProminent)
+            Button("Try Demo") { self.showingDemo = true }
+                .buttonStyle(.bordered)
         }
+        .sheet(isPresented: self.$showingDemo) { DemoWorkspaceView() }
     }
 }
 
@@ -123,6 +127,7 @@ struct WorkspaceContentView: View {
     let store: ChatStore
     @ObservedObject var manager: WorkspaceManager
     @Binding var showingPairing: Bool
+    @State private var showingSideChat = false
     @State private var showingNotificationCenter = false
     @State private var showingActivity = false
     @State private var showingNeedsYou = false
@@ -131,6 +136,63 @@ struct WorkspaceContentView: View {
     @State private var showingStatus = false
     @State private var showingSearch = false
     @State private var showingTasks = false
+    @AppStorage("sidebar.tools.expanded") private var toolsExpanded = false
+
+    private var workspaceTools: some View {
+        DisclosureGroup(isExpanded: self.$toolsExpanded) {
+            VStack(spacing: 0) {
+                Button {
+                    self.showingNeedsYou = true
+                } label: {
+                    HStack {
+                        Label("Needs you", systemImage: "hand.raised")
+                        Spacer()
+                        Text("\(self.store.attentionItems.count)").monospacedDigit()
+                    }.padding(.vertical, 9)
+                }.buttonStyle(.plain)
+                HStack {
+                    Button("Search", systemImage: "magnifyingglass") { showingSearch = true }
+                        .keyboardShortcut("k", modifiers: .command)
+                    Spacer()
+                    Button("Tasks", systemImage: "checklist") { showingTasks = true }
+                }.buttonStyle(.plain).padding(.bottom, 9)
+                Button("Deliverables", systemImage: "tray.full") { self.showingDeliverables = true }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 9)
+                Button {
+                    showingDownloads = true
+                } label: {
+                    HStack {
+                        Label("Downloads", systemImage: "arrow.down.circle")
+                        if store.downloads.activeCount > 0 { Text("\(store.downloads.activeCount)").monospacedDigit() }
+                    }
+                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 9)
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Text("Tools").font(.subheadline.weight(.semibold))
+                Spacer(minLength: 4)
+                if !self.toolsExpanded, !self.store.attentionItems.isEmpty {
+                    Label("\(self.store.attentionItems.count)", systemImage: "hand.raised.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("\(self.store.attentionItems.count) items need you")
+                }
+                if !self.toolsExpanded, self.store.downloads.activeCount > 0 {
+                    Label("\(self.store.downloads.activeCount)", systemImage: "arrow.down.circle")
+                        .font(.caption)
+                        .accessibilityLabel("\(self.store.downloads.activeCount) active downloads")
+                }
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
+    }
 
     private var showsComposer: Bool {
         #if os(macOS) && DEBUG
@@ -145,34 +207,7 @@ struct WorkspaceContentView: View {
             VStack(spacing: 0) {
                 WorkspaceSwitcher(manager: self.manager, showingPairing: self.$showingPairing)
                 Divider()
-                Button {
-                    self.showingNeedsYou = true
-                } label: {
-                    HStack {
-                        Label("Needs you", systemImage: "hand.raised")
-                        Spacer()
-                        Text("\(self.store.attentionItems.count)").monospacedDigit()
-                    }.padding(.horizontal, 14).padding(.vertical, 9)
-                }.buttonStyle(.plain)
-                HStack {
-                    Button("Search", systemImage: "magnifyingglass") { showingSearch = true }
-                        .keyboardShortcut("k", modifiers: .command)
-                    Spacer()
-                    Button("Tasks", systemImage: "checklist") { showingTasks = true }
-                }.buttonStyle(.plain).padding(.horizontal, 14).padding(.bottom, 9)
-                Button("Deliverables", systemImage: "tray.full") { self.showingDeliverables = true }
-                    .buttonStyle(.plain)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14).padding(.bottom, 9)
-                Button {
-                    showingDownloads = true
-                } label: {
-                    HStack {
-                        Label("Downloads", systemImage: "arrow.down.circle")
-                        if store.downloads.activeCount > 0 { Text("\(store.downloads.activeCount)").monospacedDigit() }
-                    }
-                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14).padding(.bottom, 9)
+                self.workspaceTools
                 Divider()
                 SessionListView(store: self.store) { self.showingActivity = true }
                 Divider()
@@ -210,7 +245,7 @@ struct WorkspaceContentView: View {
                 #endif
         } detail: {
             if self.store.selectedSessionKey != nil {
-                ChatView(store: self.store, showsComposer: self.showsComposer)
+                ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.$showingSideChat)
             } else {
                 ContentUnavailableView(
                     "Pick a conversation",
@@ -218,6 +253,7 @@ struct WorkspaceContentView: View {
                     description: Text("Sessions on this gateway appear in the sidebar."))
             }
         }
+        .modifier(SideChatInspector(store: self.store, isPresented: self.$showingSideChat))
         #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .automatic) {

@@ -249,6 +249,12 @@ public struct ShareInbox: Sendable {
         else { throw ShareInboxError.invalidDestination }
         guard !trimmed.isEmpty || !items.isEmpty else { throw ShareInboxError.emptyShare }
 
+        let fileSizes = try items.filter { $0.data != nil || $0.sourceFileURL != nil }.map { item -> Int in
+            if let data = item.data { return data.count }
+            guard let source = item.sourceFileURL, let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize else { throw ShareInboxError.invalidFile }
+            return size
+        }
+        try AttachmentLimits.validate(sizes: fileSizes)
         let requestDirectory = self.directory(for: id)
         try FileManager.default.createDirectory(at: requestDirectory, withIntermediateDirectories: true)
         do {

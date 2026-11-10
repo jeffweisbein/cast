@@ -140,16 +140,17 @@ final class ShareExtensionModel: ObservableObject {
     private func loadItems() async {
         let extensionItems = self.extensionContext?.inputItems as? [NSExtensionItem] ?? []
         let providers = extensionItems.flatMap { $0.attachments ?? [] }
-        guard providers.count <= 10 else {
+        guard providers.count <= AttachmentLimits.maxFiles else {
             self.isLoading = false
             self.payloadLoadFailed = true
-            self.errorMessage = "Cast supports up to 10 shared items at a time. Nothing has been queued."
+            self.errorMessage = "Cast supports up to 20 shared items at a time. Nothing has been queued."
             return
         }
         // Provider order is payload order. Loading one representation at a
         // time also avoids a ten-file share spiking extension memory.
         var loaded: [SharedItemInput] = []
         var loadedProviderCount = 0
+        var fileSizes: [Int] = []
         for extensionItem in extensionItems {
             if let contentText = extensionItem.attributedContentText?.string
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -158,6 +159,16 @@ final class ShareExtensionModel: ObservableObject {
             }
             for provider in extensionItem.attachments ?? [] {
                 if let item = await Self.load(provider) {
+                    if let file = item.sourceFileURL {
+                        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+                        do { try AttachmentLimits.validate(sizes: fileSizes + [size]); fileSizes.append(size) }
+                        catch {
+                            try? FileManager.default.removeItem(at: file)
+                            loaded.compactMap(\.sourceFileURL).forEach { try? FileManager.default.removeItem(at: $0) }
+                            self.isLoading = false; self.payloadLoadFailed = true; self.errorMessage = error.localizedDescription
+                            return
+                        }
+                    }
                     loadedProviderCount += 1
                     let isDuplicateText = item.kind == .text
                         && loaded.contains(where: { $0.kind == .text && $0.text == item.text })
@@ -188,6 +199,16 @@ final class ShareExtensionModel: ObservableObject {
                 sourceFileURL: file.url,
                 fileName: file.name,
                 typeIdentifier: file.type.identifier)
+        }
+
+        // Photos can advertise a still preview alongside a movie. Prefer the actual movie.
+        for identifier in provider.registeredTypeIdentifiers where UTType(identifier)?.conforms(to: .movie) == true {
+            let type = UTType(identifier) ?? .movie
+            let name = self.fileName(suggested: provider.suggestedName, fallbackBase: "Shared Video", type: type)
+            guard let url = await self.loadStagedFile(provider, typeIdentifier: identifier, fileName: name) else {
+                return nil // Never silently send a poster image when the movie could not be read.
+            }
+            return SharedItemInput(kind: .file, sourceFileURL: url, fileName: name, typeIdentifier: identifier)
         }
 
         for identifier in self.imageTypeIdentifiers(for: provider) {
@@ -389,6 +410,9 @@ final class ShareExtensionModel: ObservableObject {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("CastShareStaging", isDirectory: true)
         do {
+            let values = try source.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true, let size = values.fileSize else { return nil }
+            try AttachmentLimits.validate(sizes: [size])
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let ext = URL(fileURLWithPath: fileName).pathExtension
             let storedName = UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)")
@@ -401,6 +425,7 @@ final class ShareExtensionModel: ObservableObject {
     }
 
     nonisolated private static func stage(data: Data, fileName: String) -> URL? {
+        guard data.count <= AttachmentLimits.maxFileBytes else { return nil }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("CastShareStaging", isDirectory: true)
         do {
