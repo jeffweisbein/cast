@@ -393,6 +393,7 @@ struct OnboardingView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var step = 0
     @State private var showingPairing = false
+    @State private var showingDemo = false
 
     private let finalStep = 3
 
@@ -431,6 +432,7 @@ struct OnboardingView: View {
                     self.step = self.finalStep
                 }
             }
+            .sheet(isPresented: self.$showingDemo) { DemoWorkspaceView() }
         }
         #if os(macOS)
         .frame(minWidth: 680, minHeight: 660)
@@ -455,6 +457,11 @@ struct OnboardingView: View {
                     symbol: "rectangle.3.group.fill",
                     title: "One app, multiple workspaces",
                     message: "Each workspace points to a separate gateway. Cast does not create or host an OpenClaw account.")
+                Button("Try Demo", systemImage: "play.circle") { self.showingDemo = true }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                Text("Explore sample conversations without an account or gateway.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         case 1:
             OnboardingPage(

@@ -106,6 +106,7 @@ struct ContentView: View {
 
 struct UnconfiguredWorkspaceView: View {
     let startSetup: () -> Void
+    @State private var showingDemo = false
 
     var body: some View {
         ContentUnavailableView {
@@ -115,7 +116,10 @@ struct UnconfiguredWorkspaceView: View {
         } actions: {
             Button("Set Up Cast", action: self.startSetup)
                 .buttonStyle(.borderedProminent)
+            Button("Try Demo") { self.showingDemo = true }
+                .buttonStyle(.bordered)
         }
+        .sheet(isPresented: self.$showingDemo) { DemoWorkspaceView() }
     }
 }
 
@@ -123,6 +127,7 @@ struct WorkspaceContentView: View {
     let store: ChatStore
     @ObservedObject var manager: WorkspaceManager
     @Binding var showingPairing: Bool
+    @State private var showingSideChat = false
     @State private var showingNotificationCenter = false
     @State private var showingActivity = false
     @State private var showingNeedsYou = false
@@ -240,7 +245,7 @@ struct WorkspaceContentView: View {
                 #endif
         } detail: {
             if self.store.selectedSessionKey != nil {
-                ChatView(store: self.store, showsComposer: self.showsComposer)
+                ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.$showingSideChat)
             } else {
                 ContentUnavailableView(
                     "Pick a conversation",
@@ -248,6 +253,7 @@ struct WorkspaceContentView: View {
                     description: Text("Sessions on this gateway appear in the sidebar."))
             }
         }
+        .modifier(SideChatInspector(store: self.store, isPresented: self.$showingSideChat))
         #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .automatic) {

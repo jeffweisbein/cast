@@ -95,7 +95,7 @@ struct CommitReferencesView: View {
     }
 }
 
-private struct GitCommitGlyph: Shape {
+struct GitCommitGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         let diameter = rect.width * 0.4
@@ -105,5 +105,23 @@ private struct GitCommitGlyph: Shape {
         path.move(to: CGPoint(x: rect.midX + diameter / 2, y: rect.midY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
         return path
+    }
+}
+
+/// Attach to the outer navigation container, never its detail column. On macOS 15,
+/// a detail-column inspector registers a duplicate window separator and crashes.
+struct SideChatInspector: ViewModifier {
+    let store: ChatStore
+    @Binding var isPresented: Bool
+    func body(content: Content) -> some View {
+        content.inspector(isPresented: $isPresented) {
+            if let chat = store.sideChat {
+                SideChatView(chat: chat) {
+                    store.closeSideChat()
+                    isPresented = false
+                }
+                .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
+            }
+        }
     }
 }

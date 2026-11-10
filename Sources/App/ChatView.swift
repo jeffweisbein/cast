@@ -41,7 +41,7 @@ struct ChatView: View {
     @AppStorage("showAgentWork") private var showAgentWork = true
     // Transient view state (spec: no persistence for tool-run expansion).
     @State private var expandedRuns: Set<String> = []
-    @State private var showingSideChat = false
+    @Binding private var showingSideChat: Bool
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
@@ -78,12 +78,14 @@ struct ChatView: View {
         store: ChatStore,
         layoutStrategy: TranscriptLayoutStrategy = .productionDefault,
         allowsSending: Bool = true,
-        showsComposer: Bool = true)
+        showsComposer: Bool = true,
+        showingSideChat: Binding<Bool> = .constant(false))
     {
         self.store = store
         self.layoutStrategy = layoutStrategy
         self.allowsSending = allowsSending
         self.showsComposer = showsComposer
+        self._showingSideChat = showingSideChat
     }
 
     private var items: [TranscriptItem] {
@@ -540,15 +542,6 @@ struct ChatView: View {
 
     var body: some View {
         self.transcriptAndComposer
-        .inspector(isPresented: $showingSideChat) {
-            if let chat = store.sideChat {
-                SideChatView(chat: chat) {
-                    store.closeSideChat()
-                    showingSideChat = false
-                }
-                .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
-            }
-        }
         .toolbar {
             ToolbarItem {
                 if store.sideChat != nil {

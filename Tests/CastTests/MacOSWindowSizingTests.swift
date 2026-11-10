@@ -12,12 +12,14 @@ private final class WindowSizingSidebar: ObservableObject {
 private struct WindowSizingFixture: View {
     let store: ChatStore
     @ObservedObject var sidebar: WindowSizingSidebar
+    @State private var showingSideChat = false
     var body: some View {
         NavigationSplitView(columnVisibility: $sidebar.visibility) {
             Text("Fixture conversations").navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 380)
         } detail: {
-            ChatView(store: store).environment(\.scenePhase, .active)
+            ChatView(store: store, showingSideChat: $showingSideChat).environment(\.scenePhase, .active)
         }
+        .modifier(SideChatInspector(store: store, isPresented: $showingSideChat))
     }
 }
 
