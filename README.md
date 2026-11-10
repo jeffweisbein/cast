@@ -15,13 +15,13 @@ living in a browser tab or terminal.
 
 ## Downloads
 
-**[Download Cast for Mac](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/Cast-0.4.0-preview.3-macOS-arm64.zip)** ·
-[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.3) ·
-[SHA-256 checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/SHA256SUMS-preview3.txt)
+**[Download Cast for Mac](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.4/Cast-0.4.0-preview.4-macOS-arm64.zip)** ·
+[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.4) ·
+[SHA-256 checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.4/SHA256SUMS-preview4.txt)
 
 | Platform | Available now |
 | --- | --- |
-| **Mac — Apple Silicon, macOS 15+** | Signed and Apple-notarized **0.4.0 (11)** developer preview. Download the ZIP above, unzip, then move Cast.app to Applications. |
+| **Mac — Apple Silicon, macOS 15+** | Signed and Apple-notarized **0.4.0 (17)** developer preview. Download the ZIP above, unzip, then move Cast.app to Applications. |
 | **iPhone / iPad — iOS 26+** | [Build and sign with Xcode](CONTRIBUTING.md). No public TestFlight or App Store download yet. |
 
 Cast needs a running OpenClaw gateway you control; it does not include hosted AI access
