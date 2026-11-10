@@ -52,7 +52,18 @@ final class MacOSWindowSizingTests: XCTestCase {
         let composer = try XCTUnwrap(composers(host).first)
         window.makeFirstResponder(composer)
         var sent = 0
-        for size in [NSSize(width: 1000, height: 700), NSSize(width: 900, height: 650)] {
+        // AppKit constrains windows to the runner's visible screen. A hosted
+        // 768pt display cannot fit 700pt of content plus title/toolbar chrome.
+        // Pick two genuinely user-selectable sizes, then keep every stability
+        // and exact-size assertion below (do not accept a silently clamped size).
+        let screen = try XCTUnwrap(window.screen)
+        let chromeHeight = window.frame.height - window.contentLayoutRect.height
+        let availableHeight = floor(screen.visibleFrame.height - chromeHeight - 16)
+        let availableWidth = floor(screen.visibleFrame.width - 16)
+        let sizes = [NSSize(width: min(1000, availableWidth), height: min(700, availableHeight)),
+                     NSSize(width: min(900, availableWidth - 100), height: min(650, availableHeight - 50))]
+        print("CAST_WINDOW_SCREEN visible=\(screen.visibleFrame) chrome=\(chromeHeight) sizes=\(sizes)")
+        for size in sizes {
             window.setContentSize(size)
             try await Task.sleep(for: .milliseconds(250))
             let expected = window.frame.size
