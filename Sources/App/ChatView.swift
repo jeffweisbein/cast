@@ -190,8 +190,10 @@ struct ChatView: View {
 
     private var title: String {
         guard let key = self.store.selectedSessionKey else { return "" }
-        guard let session = self.store.sessions.first(where: { $0.key == key }) else { return key }
-        return SidebarGrouper.displayTitle(for: session, mainSessionKey: self.store.mainSessionKey)
+        let project = self.store.projectName(for: key)
+        let session = self.store.sessions.first(where: { $0.key == key })
+            ?? self.store.projectSessions(for: project).first(where: { $0.key == key })
+        return session.map { self.store.chatTitle($0) } ?? "Conversation"
     }
 
     @ViewBuilder
@@ -776,7 +778,7 @@ struct ChatView: View {
                 agentID: self.store.selectedAgentID,
                 onOpenMedia: { url in self.previewURL = url },
                 onRetrySend: { messageID in self.store.retrySend(messageID: messageID) },
-                onAskAbout: store.supportsSideChat && allowsSending && store.sideChat == nil ? { text in
+                onAskAbout: store.supportsSideChat && allowsSending && store.sideChat?.isBusy != true ? { text in
                     store.openSideChat(context: text)
                     showingSideChat = true
                 } : nil,
@@ -967,7 +969,6 @@ struct Composer: View, Equatable {
         lhs.storeIdentity == rhs.storeIdentity && lhs.allowsSending == rhs.allowsSending
     }
     #if os(iOS)
-    @State private var pasteboardHasImages = false
     @State private var sendPulse = 0
     @State private var showingPhotos = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -1096,13 +1097,6 @@ struct Composer: View, Equatable {
         .onDisappear {
             self.photoImportTask?.cancel()
             self.photoImportTask = nil
-        }
-        .onAppear { self.refreshPasteboardState() }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            self.refreshPasteboardState()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
-            self.refreshPasteboardState()
         }
         #endif
         .fileImporter(
@@ -1265,6 +1259,9 @@ struct Composer: View, Equatable {
             Button("Files", systemImage: "folder") {
                 self.importTarget = self.store.attachmentDraftTarget; self.importing = true
             }
+            Button("Paste Image", systemImage: "doc.on.clipboard") {
+                self.importFromUIPasteboard()
+            }
         } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 15, weight: .medium))
@@ -1286,20 +1283,6 @@ struct Composer: View, Equatable {
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .accessibilityLabel("Attach image or file")
-        #endif
-        #if os(iOS)
-        if self.pasteboardHasImages {
-            Button { self.importFromUIPasteboard() } label: {
-                Image(systemName: "photo.on.rectangle.angled")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(.vertical, 4)
-            .accessibilityLabel("Paste image from clipboard")
-        }
         #endif
         #if os(macOS)
         // NSTextView representable so we control the insets ourselves; a SwiftUI
@@ -1526,10 +1509,6 @@ struct Composer: View, Equatable {
     #endif
 
     #if os(iOS)
-    private func refreshPasteboardState() {
-        self.pasteboardHasImages = UIPasteboard.general.hasImages
-    }
-
     private func importFromUIPasteboard() {
         for image in UIPasteboard.general.images ?? [] {
             guard let data = image.pngData() ?? image.jpegData(compressionQuality: 0.9) else { continue }
@@ -1564,11 +1543,13 @@ struct Composer: View, Equatable {
 /// AppKit-backed composer field. We drive the insets ourselves so the SwiftUI placeholder
 /// overlay can share the exact origin as the caret. NSScrollView + NSTextView gives us a
 /// real scroll container above the composer's height cap without extra plumbing.
-private struct ComposerNSTextView: NSViewRepresentable {
+struct ComposerNSTextView: NSViewRepresentable {
     @Binding var text: String
     var onEditingChange: (Bool) -> Void
     var onCommit: () -> Void
     var onMeasuredHeightChange: (CGFloat) -> Void
+    var isEditable = true
+    var accessibilityLabel = "Message"
 
     /// Origin offset from the field's top-left corner where the first glyph lands. The
     /// SwiftUI placeholder uses these same numbers as its leading/top padding so the two
@@ -1589,7 +1570,8 @@ private struct ComposerNSTextView: NSViewRepresentable {
         textView.textColor = NSColor.textColor
         textView.insertionPointColor = NSColor.controlAccentColor
         textView.drawsBackground = false
-        textView.isEditable = true
+        textView.isEditable = self.isEditable
+        textView.setAccessibilityLabel(self.accessibilityLabel)
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
@@ -1619,6 +1601,8 @@ private struct ComposerNSTextView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = nsView.documentView as? NSTextView else { return }
+        textView.isEditable = self.isEditable
+        textView.setAccessibilityLabel(self.accessibilityLabel)
         if textView.string != self.text {
             textView.string = self.text
             DispatchQueue.main.async {
@@ -1668,6 +1652,8 @@ private struct ComposerNSTextView: NSViewRepresentable {
         ///                         event's modifier flags)
         ///   Option/Ctrl+Return  → newline (insertLineBreak: / insertNewlineIgnoringFieldEditor:)
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard !textView.hasMarkedText() else { return false }
+            guard parent.isEditable else { return true }
             switch selector {
             case #selector(NSResponder.insertNewline(_:)):
                 if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {

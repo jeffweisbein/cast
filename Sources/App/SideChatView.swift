@@ -2,12 +2,14 @@ import SwiftUI
 
 struct SideChatView: View {
     @Bindable var chat: SideChat
+    var scopeTitle: String = "Side chat"
     let onClose: () -> Void
+    @State private var composerHeight: CGFloat = 20
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("Side chat", systemImage: "bubble.left.and.bubble.right")
+                Label(scopeTitle, systemImage: "bubble.left.and.bubble.right")
                     .font(.headline)
                 Spacer()
                 Button("Close side chat", systemImage: "xmark", action: onClose)
@@ -18,8 +20,8 @@ struct SideChatView: View {
             Text("Separate conversation · saved on your gateway")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-            DisclosureGroup("About this passage") {
-                Text(chat.context).font(.callout).textSelection(.enabled)
+            DisclosureGroup(chat.context.isEmpty ? "Original passage" : "About this passage") {
+                Text(chat.context.isEmpty ? "The original passage isn’t in the available history yet. Refresh after reconnecting." : chat.context).font(.callout).textSelection(.enabled)
                     .frame(maxHeight: 150).clipped()
             }.padding().background(.quaternary.opacity(0.3))
             ScrollViewReader { proxy in
@@ -46,22 +48,44 @@ struct SideChatView: View {
             }
             Divider()
             HStack(alignment: .bottom) {
+                #if os(macOS)
+                ComposerNSTextView(text: $chat.draft, onEditingChange: { _ in },
+                    onCommit: sendDraft, onMeasuredHeightChange: { composerHeight = $0 },
+                    isEditable: !chat.isBusy, accessibilityLabel: "Side chat question")
+                    .frame(height: min(120, max(32, composerHeight + 12)))
+                    .overlay(alignment: .topLeading) {
+                        if chat.draft.isEmpty {
+                            Text("Ask about this passage…").foregroundStyle(.secondary)
+                                .padding(.leading, 5).padding(.top, 6).allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                #else
                 TextField("Ask about this passage…", text: $chat.draft, axis: .vertical)
                     .lineLimit(1...6).textFieldStyle(.plain)
                     .accessibilityLabel("Side chat question")
+                    .submitLabel(.send)
+                    .onSubmit(sendDraft)
                     .disabled(chat.isBusy)
+                #endif
                 if chat.isBusy {
                     Button("Stop", systemImage: "stop.circle") { Task { await chat.stop() } }.labelStyle(.iconOnly)
                 } else {
-                    Button("Send", systemImage: "arrow.up.circle.fill") { Task { await chat.send() } }
+                    Button("Send", systemImage: "arrow.up.circle.fill", action: sendDraft)
                         .labelStyle(.iconOnly).font(.title2)
-                        .disabled(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!chat.historyLoaded || chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }.padding()
             Button("Refresh side chat", systemImage: "arrow.clockwise") { Task { await chat.refresh() } }
                 .font(.caption).buttonStyle(.borderless).padding(.bottom, 8)
         }
         .frame(minWidth: 280, idealWidth: 360)
+    }
+
+    private func sendDraft() {
+        guard chat.historyLoaded, !chat.isBusy,
+              !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task { await chat.send() }
     }
 
     private func displayQuestion(_ text: String) -> String {
@@ -113,10 +137,15 @@ struct GitCommitGlyph: Shape {
 struct SideChatInspector: ViewModifier {
     let store: ChatStore
     @Binding var isPresented: Bool
+    private func scopeTitle(for key: String) -> String {
+        let project = store.projectName(for: key)
+        let known = store.sessions.contains { $0.key == key } || project != nil
+        return known ? (project ?? "General") + " › Side chat" : "Side chat"
+    }
     func body(content: Content) -> some View {
         content.inspector(isPresented: $isPresented) {
             if let chat = store.sideChat {
-                SideChatView(chat: chat) {
+                SideChatView(chat: chat, scopeTitle: scopeTitle(for: chat.sessionKey)) {
                     store.closeSideChat()
                     isPresented = false
                 }

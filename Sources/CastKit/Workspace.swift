@@ -331,7 +331,14 @@ public final class WorkspaceManager: ObservableObject {
         guard self.unreadCountsByWorkspace[workspaceID] != count else { return }
         self.unreadCountsByWorkspace[workspaceID] = count
         self.unreadSessionCount = self.unreadCountsByWorkspace.values.reduce(0, +)
-        Task {
+        self.refreshNativeBadge()
+    }
+
+    /// Reassert on foreground even when the count did not change: iOS owns icon state
+    /// separately from SwiftUI observation and a prior native write may have failed.
+    private func refreshNativeBadge() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             await NativeNotificationDelivery.shared.setBadgeCount(self.unreadSessionCount)
         }
     }
@@ -368,6 +375,7 @@ public final class WorkspaceManager: ObservableObject {
 
     public func setApplicationActive(_ active: Bool) {
         self.isApplicationActive = active
+        if active { self.refreshNativeBadge() }
         for (workspaceID, store) in self.stores {
             store.isNotificationContextVisible = active && workspaceID == self.selectedWorkspaceID
         }

@@ -1,0 +1,17 @@
+# Side-chat archive sync
+
+Manual archive/restore is personal presentation state, not a gateway session lifecycle action. Cast uses `users.self` and `users.prefs.get/set` with `cast.sideChats.manualArchive.v1`; it never uses `sessions.patch archived` for this feature. The gateway derives the preference owner from the authenticated connection, not a client-supplied identity. Canonical `gateway-owner` profiles are valid when returned by `users.self` (unprofiled connections are not).
+
+Local archive files remain scoped to workspace ID and exact gateway URL. The first successful sync also binds the file to the returned canonical profile ID. A changed profile pauses synchronization instead of uploading the previous person's pending changes. Existing manual archives migrate once, and only where the remote map has no entry. Explicit false values are retained as restore tombstones so an older device's first migration cannot resurrect an archive that another device restored.
+
+Explicit changes are saved locally before UI success, then flushed through atomic `expectedEntries` comparison. A conflict rereads and merges, up to three attempts. Pending changes survive relaunch and failures; an acknowledgment cannot discard a newer, different local operation. Refresh, reconnect and `users.prefs.changed` pull remote state. A busy old-connection sync cannot consume the new connection's refresh request. Missing capabilities, identity failure, storage errors and exhausted retries are visible; no global-archive fallback exists.
+
+Automatic inactivity cleanup and its settings remain device-local. Drafts, quoted passages and delivery state never enter user preferences. Manually opening an archived side chat queues the same restore operation as the Restore button.
+
+## Limits and acceptance
+
+The installed gateway allows **4 KiB per preference value**. This version uses one map and refuses an oversize update without truncating it; pending changes and uncompleted legacy migration remain local with a storage-full notice. Remote changes to non-pending keys still apply. Tombstone compaction and account-rebinding UI are not implemented; mismatched identities remain paused to prevent cross-account uploads. This is bounded support, not an unlimited archive store. Concurrent explicit operations on the same chat converge in successful-write order; the protocol has no server timestamp or per-operation revision. A timeout after a write may leave delivery unknown until a later read; offline pending intent may be reapplied on reconnect.
+
+Native model tests in `SideChatRecoveryTests.swift` cover two device stores and relaunch, one-time migration/restore tombstones, canonical-owner acceptance, profile mismatch, retained pending writes, CAS conflicts preserving other entries, and late acknowledgments. The iPhone offline fixture checks both header labels exist in light and dark; leading-edge alignment is assessed separately from inspected screenshots, not asserted by unlike accessibility wrapper bounds. These tests do not establish a live Mac-to-iPhone account match or user acceptance.
+
+The iOS composer has no separate clipboard-image button or passive clipboard polling. The paperclip menu retains Photos & Videos, Files, and explicit Paste Image. Plain text continues through the native text field; image paste is the existing menu action, not a newly introduced native image-paste implementation.

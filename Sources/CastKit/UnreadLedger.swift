@@ -242,6 +242,16 @@ public struct UnreadLedger: Codable, Equatable, Sendable {
         return previous != session
     }
 
+    /// Only a completed, unchanged full inventory may retire rows no longer visible.
+    public mutating func retainSessions(workspaceID: String, keys: Set<String>) {
+        guard var workspace = self.workspaces[workspaceID] else { return }
+        let canonical = Set(keys.map { SessionKeyMatcher.canonical($0) })
+        workspace = WorkspaceUnreadState(sessions: workspace.sessions.filter {
+            canonical.contains(SessionKeyMatcher.canonical($0.key))
+        })
+        self.workspaces[workspaceID] = workspace
+    }
+
     /// Clear a workspace in one mutation. Calling clearOnOpen in a loop copies the nested
     /// sessions dictionary once per chat because each call temporarily shares its storage.
     public mutating func clearAll(

@@ -77,14 +77,22 @@ final class OperationsLedgerTests: XCTestCase {
 
         XCTAssertEqual(store.numericUnreadCount, 1)
         XCTAssertEqual(store.unreadCount(for: "agent:main:other"), 1)
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.count, 1)
         XCTAssertEqual(store.notificationRecords.first?.state, .suppressed)
+        #endif
 
         store.selectedSessionKey = "agent:main:other"
 
         XCTAssertEqual(store.numericUnreadCount, 0)
         XCTAssertEqual(store.unreadCount(for: "agent:main:other"), 0)
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.first?.state, .read)
+        #endif
     }
 
     private func session(
@@ -633,18 +641,26 @@ final class MuteLedgerTests: XCTestCase {
         // Unread accounting is untouched: mute is not "mark as read".
         XCTAssertEqual(store.unreadCount(for: "agent:main:noisy"), 1)
         // The interruption is what got suppressed, and the ledger records why.
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         let record = try XCTUnwrap(store.notificationRecords.first)
         XCTAssertEqual(record.state, .suppressed)
         XCTAssertEqual(record.transitions.last?.detail, "muted")
+        #endif
 
         // An unmuted session in the same store keeps the normal path (test-host
         // suppression, not "muted").
         store.handleEvent(try self.replyEvent(sessionKey: "agent:main:other", id: "m-2"))
         store.handleEvent(try taskCompletionEvent(sessionKey: "agent:main:other", runID: "unmuted"))
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         let other = try XCTUnwrap(store.notificationRecords.first(where: {
             $0.linkage.sessionKey == "agent:main:other"
         }))
         XCTAssertEqual(other.transitions.last?.detail, "test-host")
+        #endif
     }
 
     @MainActor
@@ -722,7 +738,11 @@ final class SidebarVisibilityTests: XCTestCase {
         XCTAssertTrue(store.isSessionHidden(key))
         XCTAssertEqual(store.numericUnreadCount, 0)
         XCTAssertEqual(store.unreadCount(for: key), 0)
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.last?.transitions.last?.detail, "hidden")
+        #endif
         XCTAssertGreaterThan(store.unreadCountsBySession[key] ?? 0, 0)
 
         // A gateway refresh must not resurrect the row, even with fresh activity.
@@ -763,7 +783,7 @@ final class SidebarVisibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testPinWinsOverInboxAndHidingSelectedChatSelectsVisibleFallback() throws {
+    func testPinWinsOverInboxAndHidingSelectedChatDoesNotOpenAnotherChat() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ChatStore(transcriptCacheRoot: root, operationsLedgerRoot: root)
@@ -775,7 +795,7 @@ final class SidebarVisibilityTests: XCTestCase {
         store.selectedSessionKey = favorite
         store.setDraft("Keep this draft", forSession: favorite)
         store.setSessionHidden(true, sessionKey: favorite)
-        XCTAssertEqual(store.selectedSessionKey, inbox)
+        XCTAssertNil(store.selectedSessionKey, "Hide must not open another conversation")
         XCTAssertEqual(store.draft(forSession: favorite), "Keep this draft")
         XCTAssertTrue(store.isSessionPinned(favorite))
         store.undoHideSession()

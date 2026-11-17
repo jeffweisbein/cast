@@ -7,9 +7,11 @@ import Foundation
 /// boundary (for example, from a `@MainActor` store).
 public struct AtomicJSONLedgerStore<Value: Codable & Sendable>: Sendable {
     public let fileURL: URL
+    private let ownerOnly: Bool
 
-    public init(fileURL: URL) {
+    public init(fileURL: URL, ownerOnly: Bool = false) {
         self.fileURL = fileURL
+        self.ownerOnly = ownerOnly
     }
 
     public func load(defaultValue: Value) throws -> Value {
@@ -25,10 +27,18 @@ public struct AtomicJSONLedgerStore<Value: Codable & Sendable>: Sendable {
         try FileManager.default.createDirectory(
             at: parent,
             withIntermediateDirectories: true)
+        // Sensitive archives use the same owner-only convention as SendOutbox.
+        // Restrict the directory before atomic writing also protects the temporary file.
+        if ownerOnly {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(value)
         try data.write(to: self.fileURL, options: .atomic)
+        if ownerOnly {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        }
     }
 }
 

@@ -4,3 +4,6 @@ DerivedData/
 xcuserdata/
 .DS_Store
 __pycache__/
+
+# Generated offline UI fixture project
+Tests/SideChatFixture/*.xcodeproj/

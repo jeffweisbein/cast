@@ -100,12 +100,12 @@ struct DeliverableRow: View {
     let openConversation: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var previewURL: URL?
-    @State private var error: String?
+    @State private var exporting = false
+    @State private var exportResultMessage: String?
     private var entry: DownloadCenter.Entry? { store.downloads.entry(for: item) }
     private var cachedURL: URL? {
         if case .saved(let url) = entry?.phase { return url }; return nil
     }
-    @State private var exporting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -125,17 +125,13 @@ struct DeliverableRow: View {
                 HStack { self.actions }
                 VStack(alignment: .leading) { self.actions }
             }
-            if let error = self.error { Text(error).font(.caption).foregroundStyle(.red) }
         }
         .padding(.vertical, 6)
         .task(id: self.item.reviewID) {
             await store.inspectDownload(item)
         }
         .quickLookPreview(self.$previewURL)
-        .fileExporter(isPresented: $exporting, document: cachedURL.map { DownloadExport(url: $0) },
-                      contentType: .data, defaultFilename: cachedURL?.lastPathComponent) { result in
-            if case .failure = result { error = "Couldn’t save the file to that location. Try another folder." }
-        }
+        .modifier(DownloadExportPresenter(url: cachedURL, exporting: $exporting, resultMessage: $exportResultMessage))
     }
 
     private var canDownload: Bool {
@@ -152,9 +148,9 @@ struct DeliverableRow: View {
             #if os(macOS)
             Button("Reveal", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             #endif
-            Button("Save as…", systemImage: "square.and.arrow.down") { exporting = true }
+            DownloadSaveButton(exporting: $exporting, resultMessage: $exportResultMessage)
             ShareLink(item: url)
-            Text("On this device").font(.caption2).foregroundStyle(.secondary)
+            Text("Downloaded inside Cast").font(.caption2).foregroundStyle(.secondary)
         } else {
             if let entry {
                 switch entry.phase {
@@ -171,9 +167,9 @@ struct DeliverableRow: View {
                 case .saved: EmptyView()
                 }
             }
-            if entry?.phase.isActive != true {
+            if entry?.phase.isActive != true && entry?.canRetry != false {
                 Button(entry == nil ? "Get file" : "Retry download", systemImage: "arrow.down.doc") {
-                    error = nil; store.startDownload(item)
+                    store.startDownload(item)
                 }
                 .disabled(!canDownload)
                 .help("Download this attachment from its authorized conversation")
@@ -187,12 +183,47 @@ struct DeliverableRow: View {
     }
 }
 
-private struct DownloadExport: FileDocument {
+/// Shared by the chat link sheet and Downloads. A completed transfer is a private
+/// cache entry, not a user-visible Files/Downloads export until this action succeeds.
+struct DownloadSaveButton: View {
+    @Binding var exporting: Bool
+    @Binding var resultMessage: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button("Save as…", systemImage: "square.and.arrow.down") { resultMessage = nil; exporting = true }
+                .accessibilityIdentifier("download.save-copy")
+            if let resultMessage { Text(resultMessage).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+/// The presenter and its bindings belong to the stable document/row, never a
+/// ViewThatFits alternative. Export feedback can itself change the chosen layout.
+struct DownloadExportPresenter: ViewModifier {
+    let url: URL?
+    @Binding var exporting: Bool
+    @Binding var resultMessage: String?
+    func body(content: Content) -> some View {
+        content.fileExporter(isPresented: $exporting, document: url.map { DownloadExport(url: $0) },
+                      contentType: url.flatMap { UTType(filenameExtension: $0.pathExtension) } ?? .data,
+                      defaultFilename: url?.lastPathComponent) { result in
+            switch result {
+            case .success: resultMessage = "Saved a copy to your selected folder."
+            case .failure(let error):
+                let cocoa = error as NSError
+                if cocoa.domain != NSCocoaErrorDomain || cocoa.code != NSUserCancelledError {
+                    resultMessage = "Couldn’t save the file to that location. Try another folder."
+                }
+            }
+        }
+    }
+}
+
+struct DownloadExport: FileDocument {
     static var readableContentTypes: [UTType] { [.data] }
     let url: URL
     init(url: URL) { self.url = url }
     init(configuration: ReadConfiguration) throws { throw CocoaError(.fileReadUnsupportedScheme) }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        try FileWrapper(url: url, options: .immediate)
-    }
+    func snapshot() throws -> FileWrapper { try FileWrapper(url: url, options: .immediate) }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { try snapshot() }
 }

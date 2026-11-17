@@ -16,6 +16,9 @@ public actor NativeNotificationDelivery {
     public static let shared = NativeNotificationDelivery()
 
     private let center = UNUserNotificationCenter.current()
+    private let badgeWriter = BadgeCountDelivery { count in
+        try await UNUserNotificationCenter.current().setBadgeCount(count)
+    }
 
     public func isAuthorized() async -> Bool {
         let status = await self.center.notificationSettings().authorizationStatus
@@ -91,7 +94,7 @@ public actor NativeNotificationDelivery {
     }
 
     public func setBadgeCount(_ count: Int) async {
-        try? await self.center.setBadgeCount(max(0, count))
+        await self.badgeWriter.set(count)
     }
 }
 
@@ -177,6 +180,25 @@ public final class NativeNotificationResponseRouter: NSObject, UNUserNotificatio
         Task { @MainActor in
             let present = self.presentRemoteDestination?(destination) ?? false
             completionHandler(present ? [.banner, .sound] : [])
+        }
+    }
+}
+
+/// Serialize the native async writes; actor reentrancy must not let a slow old count
+/// finish after a newer clear. New requests coalesce while one write is in flight.
+actor BadgeCountDelivery {
+    private let write: @Sendable (Int) async throws -> Void
+    private var pending: Int?
+    private var writing = false
+    init(write: @escaping @Sendable (Int) async throws -> Void) { self.write = write }
+    func set(_ count: Int) async {
+        self.pending = max(0, count)
+        guard !self.writing else { return }
+        self.writing = true
+        defer { self.writing = false }
+        while let next = self.pending {
+            self.pending = nil
+            try? await self.write(next)
         }
     }
 }
