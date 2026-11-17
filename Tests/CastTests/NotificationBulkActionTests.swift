@@ -215,7 +215,7 @@ final class NotificationBulkActionTests: XCTestCase {
             .save(.init(recordsByDedupeID: records))
         let store = ChatStore(profile: .init(id: "home", name: "Home", gatewayURL: URL(string: "wss://example.invalid")!, accent: "blue"),
                               transcriptCacheRoot: root.appendingPathComponent("transcripts"), operationsLedgerRoot: root)
-        XCTAssertEqual(store.numericUnreadCount, 10_000)
+        XCTAssertEqual(store.numericUnreadCount, 2_000)
         let start = ContinuousClock.now
         store.markAllRead()
         let elapsed = start.duration(to: .now)

@@ -7,13 +7,19 @@ import Foundation
 public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
     public var id: String { self.key }
     public let key: String
+    public let sessionId: String?
+    public var category: String?
+    public let archived: Bool?
+    public let isBackground: Bool?
+    public let lastInteractionAt: Double?
     public let kind: String?
-    public let displayName: String?
-    public let derivedTitle: String?
-    public let lastMessagePreview: String?
+    public var displayName: String?
+    public var derivedTitle: String?
+    public var lastMessagePreview: String?
     public let channel: String?
     public let updatedAt: Double?
     public let unread: Bool?
+    public let lastReadAt: Double?
     public let pinned: Bool?
     public let hasActiveRun: Bool?
     public let model: String?
@@ -56,9 +62,20 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
         contextTokens: Double? = nil,
         modelInfo: SessionModelInfo? = nil,
         totalTokensFresh: Bool? = nil,
-        estimatedCostUsd: Double? = nil)
+        estimatedCostUsd: Double? = nil,
+        lastReadAt: Double? = nil,
+        sessionId: String? = nil,
+        category: String? = nil,
+        archived: Bool? = nil,
+        isBackground: Bool? = nil,
+        lastInteractionAt: Double? = nil)
     {
         self.key = key
+        self.sessionId = sessionId
+        self.category = ProjectSidebar.normalizedName(category)
+        self.archived = archived
+        self.isBackground = isBackground
+        self.lastInteractionAt = lastInteractionAt
         self.kind = kind
         self.displayName = displayName
         self.derivedTitle = derivedTitle
@@ -66,6 +83,7 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
         self.channel = channel
         self.updatedAt = updatedAt
         self.unread = unread
+        self.lastReadAt = lastReadAt.flatMap { $0.isFinite ? $0 : nil }
         self.pinned = pinned
         self.hasActiveRun = hasActiveRun
         self.model = model
@@ -86,6 +104,7 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
     public var title: String {
         if let name = self.displayName, !name.isEmpty { return name }
         if let derived = self.derivedTitle, !derived.isEmpty { return derived }
+        if ProjectSidebar.isProjectChatKey(self.key) { return "New conversation" }
         return self.key
     }
 
@@ -105,6 +124,17 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
               total.isFinite, window.isFinite, window > 0, total >= 0
         else { return nil }
         return min(total / window, 1)
+    }
+
+    /// Metadata-only inventory omits these optional presentation fields; it must not
+    /// erase a richer row for the same incarnation. Membership/state fields stay fresh.
+    public func preservingPresentation(from previous: SessionRow?) -> SessionRow {
+        guard let previous, previous.key == self.key, previous.sessionId == self.sessionId else { return self }
+        var row = self
+        if row.displayName == nil { row.displayName = previous.displayName }
+        if row.derivedTitle == nil { row.derivedTitle = previous.derivedTitle }
+        if row.lastMessagePreview == nil { row.lastMessagePreview = previous.lastMessagePreview }
+        return row
     }
 
     public func settingUnread(_ unread: Bool) -> SessionRow {
@@ -131,12 +161,15 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
             contextTokens: self.contextTokens,
             modelInfo: self.modelInfo,
             totalTokensFresh: self.totalTokensFresh,
-            estimatedCostUsd: self.estimatedCostUsd)
+            estimatedCostUsd: self.estimatedCostUsd,
+            lastReadAt: self.lastReadAt, sessionId: self.sessionId, category: self.category,
+            archived: self.archived, isBackground: self.isBackground, lastInteractionAt: self.lastInteractionAt)
     }
 
     enum CodingKeys: String, CodingKey {
+        case sessionId, category, archived, isBackground, lastInteractionAt
         case key, kind, displayName, derivedTitle, lastMessagePreview, channel, updatedAt
-        case unread, pinned, hasActiveRun, model, modelInfo, status, abortedLastRun, spawnedBy, label, subagentRole
+        case unread, lastReadAt, pinned, hasActiveRun, model, modelInfo, status, abortedLastRun, spawnedBy, label, subagentRole
         case inputTokens, outputTokens, totalTokens, contextTokens, totalTokensFresh, estimatedCostUsd
     }
 
@@ -167,7 +200,13 @@ public struct SessionRow: Codable, Identifiable, Sendable, Equatable {
             contextTokens: (try? container.decodeIfPresent(Double.self, forKey: .contextTokens)) ?? nil,
             modelInfo: (try? container.decodeIfPresent(SessionModelInfo.self, forKey: .modelInfo)) ?? (try? SessionModelInfo(from: decoder)),
             totalTokensFresh: (try? container.decodeIfPresent(Bool.self, forKey: .totalTokensFresh)) ?? nil,
-            estimatedCostUsd: (try? container.decodeIfPresent(Double.self, forKey: .estimatedCostUsd)) ?? nil)
+            estimatedCostUsd: (try? container.decodeIfPresent(Double.self, forKey: .estimatedCostUsd)) ?? nil,
+            lastReadAt: (try? container.decodeIfPresent(Double.self, forKey: .lastReadAt)) ?? nil,
+            sessionId: (try? container.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil,
+            category: (try? container.decodeIfPresent(String.self, forKey: .category)) ?? nil,
+            archived: (try? container.decodeIfPresent(Bool.self, forKey: .archived)) ?? nil,
+            isBackground: (try? container.decodeIfPresent(Bool.self, forKey: .isBackground)) ?? nil,
+            lastInteractionAt: (try? container.decodeIfPresent(Double.self, forKey: .lastInteractionAt)) ?? nil)
     }
 }
 
@@ -178,6 +217,10 @@ public struct SessionsListResponse: Decodable, Sendable {
 
     public let sessions: [SessionRow]
     public let defaults: Defaults?
+    public let hasMore: Bool?
+    public let nextOffset: Int?
+    public let totalCount: Int?
+    public let truncated: Bool?
 }
 
 // MARK: - Transcript messages

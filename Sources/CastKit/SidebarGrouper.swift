@@ -110,7 +110,7 @@ public enum SidebarGrouper {
         // Work zones drop anything quiet for 24h, which would make a slow thread disappear from
         // the sidebar. The gateway collapses `:group:` and `:channel:` into kind "group"
         // (openclaw src/gateway/session-utils.ts classifySessionKey), so both are handled here.
-        if self.isHumanConversation(key) { return .main }
+        if self.isHumanConversation(key) || SavedSideChat.isSideChatKey(key) { return .main }
         if SessionKeyMatcher.matches(key, mainSessionKey ?? self.fallbackMainKey) { return .main }
         return .chat
     }
@@ -408,6 +408,7 @@ public enum SidebarGrouper {
         }
         if SessionKeyMatcher.matches(key, mainSessionKey ?? self.fallbackMainKey) { return "Agent Inbox" }
         if let raw { return raw }
+        if ProjectSidebar.isProjectChatKey(key) { return "New conversation" }
         if tail == "main", let agent = SessionKeyMatcher.agentID(from: key) { return self.humanize(agent) }
         return self.humanize(self.stripTrailingID(tail))
     }

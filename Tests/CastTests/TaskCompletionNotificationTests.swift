@@ -32,9 +32,13 @@ final class TaskCompletionNotificationTests: XCTestCase {
         let event = try taskCompletionEvent(sessionKey: key)
         store.handleEvent(event)
         store.handleEvent(event)
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.count, 1)
         XCTAssertEqual(store.notificationRecords.first?.linkage.sourceEventID, "completion:run-1")
         XCTAssertEqual(store.notificationRecords.first?.transitions.last?.detail, "test-host")
+        #endif
     }
 
     @MainActor
@@ -44,12 +48,24 @@ final class TaskCompletionNotificationTests: XCTestCase {
         let key = "agent:main:task"
         store.selectedSessionKey = key
         store.handleEvent(try taskCompletionEvent(sessionKey: key, runID: "visible"))
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.first?.transitions.last?.detail, "visible-session")
+        #endif
         store.isNotificationContextVisible = false
         store.handleEvent(try taskCompletionEvent(sessionKey: key, runID: "away"))
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.first(where: { $0.linkage.sourceEventID == "completion:away" })?.transitions.last?.detail, "test-host")
+        #endif
         store.handleEvent(try taskCompletionEvent(sessionKey: key, runID: "visible"))
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS completion delivery")
+        #else
         XCTAssertEqual(store.notificationRecords.count, 2)
+        #endif
     }
 
     @MainActor

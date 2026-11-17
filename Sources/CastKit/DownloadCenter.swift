@@ -14,6 +14,7 @@ public final class DownloadCenter {
         public let item: Deliverable
         public let attempt: UUID
         public var phase: Phase
+        public var canRetry = true
         public var received = 0
         public var total: Int?
         public var updatedAt = Date()
@@ -68,7 +69,7 @@ public final class DownloadCenter {
             } catch is CancellationError {
                 self?.finish(key: key, attempt: attempt, phase: .cancelled)
             } catch {
-                self?.finish(key: key, attempt: attempt, phase: .failed(Self.message(for: error)))
+                self?.finish(key: key, attempt: attempt, phase: .failed(Self.message(for: error)), canRetry: Self.canRetry(error))
             }
         }
     }
@@ -80,9 +81,9 @@ public final class DownloadCenter {
         entries[key]?.received = max(0, received)
         entries[key]?.total = total
     }
-    private func finish(key: String, attempt: UUID, phase: Phase) {
+    private func finish(key: String, attempt: UUID, phase: Phase, canRetry: Bool = true) {
         guard entries[key]?.attempt == attempt, entries[key]?.phase.isActive == true else { return }
-        entries[key]?.phase = phase; entries[key]?.updatedAt = Date(); tasks[key] = nil; progressDates[key] = nil
+        entries[key]?.phase = phase; entries[key]?.canRetry = canRetry; entries[key]?.updatedAt = Date(); tasks[key] = nil; progressDates[key] = nil
     }
     public func cancel(_ item: Deliverable) {
         let key = Self.key(item)
@@ -108,7 +109,18 @@ public final class DownloadCenter {
         for task in tasks.values { task.cancel() }
         tasks.removeAll(); entries.removeAll(); progressDates.removeAll()
     }
+    /// A gateway boundary refusal cannot be repaired by retrying the same host path.
+    /// Do not turn unrelated RPC failures into permission failures or weaken the scope.
+    public static func canRetry(_ error: Error) -> Bool {
+        if let transfer = error as? ArtifactTransferError, transfer == .notAttached { return false }
+        guard let gateway = error as? GatewayRequestError else { return true }
+        return !(gateway.method == "sessions.files.get" && gateway.reason == "outside_session_boundary")
+    }
     public static func message(for error: Error) -> String {
+        if let transfer = error as? ArtifactTransferError, transfer == .notAttached { return transfer.localizedDescription }
+        if !canRetry(error) {
+            return "This link points to a file that wasn’t attached to this conversation. Ask the agent to attach it, then open it from conversation attachments. Retrying this link won’t download it."
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .networkConnectionLost: return "Connection lost. Reconnect, then retry this download."

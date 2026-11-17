@@ -182,5 +182,59 @@ final class UXReliabilityTests: XCTestCase {
         XCTAssertEqual(store.approvalActivity["A"]?.state, .uncertain)
     }
 
+    @MainActor func testBoundaryRefusalDoesNotOfferAnEndlessRetryOrClaimSaved() async {
+        let center = DownloadCenter(), file = item()
+        let refusal = GatewayRequestError(method: "sessions.files.get", code: "INVALID_REQUEST",
+            message: "session file not found", reason: "outside_session_boundary")
+        center.start(file) { _ in throw refusal }
+        while center.activeCount > 0 { await Task.yield() }
+        let entry = center.entry(for: file)
+        XCTAssertEqual(entry?.canRetry, false)
+        guard case .failed(let message) = entry?.phase else { return XCTFail("Refused file must not be saved") }
+        XCTAssertTrue(message.contains("attach"))
+        XCTAssertFalse(message.contains("INVALID_REQUEST"))
+        // A later successful, verified cache lookup can recover without weakening scope.
+        await center.inspect(file) { URL(fileURLWithPath: "/verified-cache") }
+        XCTAssertEqual(center.entry(for: file)?.phase, .saved(URL(fileURLWithPath: "/verified-cache")))
+        XCTAssertEqual(center.entry(for: file)?.canRetry, true)
+    }
+    @MainActor func testPreviewOnlyResponseRequiresAttachmentInsteadOfRetry() async {
+        let center = DownloadCenter(), file = item()
+        let response = AnyCodable(["file": AnyCodable(["previewKind": AnyCodable("unsupported")])])
+        center.start(file) { _ in
+            _ = try ArtifactTransferPolicy.fileBytes(response)
+            XCTFail("Preview-only response must not be saved")
+            return URL(fileURLWithPath: "/bad")
+        }
+        while center.activeCount > 0 { await Task.yield() }
+        XCTAssertEqual(center.entry(for: file)?.canRetry, false)
+        guard case .failed(let message) = center.entry(for: file)?.phase else { return XCTFail("Expected attachment-required failure") }
+        XCTAssertTrue(message.contains("attach the file"))
+    }
+    @MainActor func testOtherDownloadFailuresRemainRetryable() {
+        for failure: Error in [URLError(.networkConnectionLost), ArtifactTransferError.unavailable,
+            GatewayRequestError(method: "sessions.files.get", code: "INVALID_REQUEST", message: "file not found", reason: "missing"),
+            GatewayRequestError(method: "different.method", code: "INVALID_REQUEST", message: "unrelated", reason: "outside_session_boundary")] {
+            XCTAssertTrue(DownloadCenter.canRetry(failure))
+        }
+        XCTAssertTrue(DownloadCenter.message(for: URLError(.networkConnectionLost)).contains("Reconnect"))
+    }
+    func testSaveCopyExportsBinaryBytesWithoutMovingCacheAndFailsForMissingFile() throws {
+        let root = temp()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Franklin.png")
+        let output = root.appendingPathComponent("exported.png")
+        let bytes = Data([0x89, 0x50, 0x4E, 0x47, 0, 255, 1, 2])
+        try bytes.write(to: source)
+        let wrapper = try DownloadExport(url: source).snapshot()
+        XCTAssertTrue(wrapper.isRegularFile)
+        try wrapper.write(to: output, options: .atomic, originalContentsURL: nil)
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        try FileManager.default.removeItem(at: source)
+        XCTAssertThrowsError(try DownloadExport(url: source).snapshot())
+    }
+
     private func temp() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
 }

@@ -127,7 +127,10 @@ struct WorkspaceContentView: View {
     let store: ChatStore
     @ObservedObject var manager: WorkspaceManager
     @Binding var showingPairing: Bool
-    @State private var showingSideChat = false
+    private var sideChatPresentation: Binding<Bool> {
+        Binding(get: { store.isSideChatPresented }, set: { store.isSideChatPresented = $0 })
+    }
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var showingNotificationCenter = false
     @State private var showingActivity = false
     @State private var showingNeedsYou = false
@@ -145,7 +148,7 @@ struct WorkspaceContentView: View {
                     self.showingNeedsYou = true
                 } label: {
                     HStack {
-                        Label("Needs you", systemImage: "hand.raised")
+                        Label("All attention items", systemImage: "hand.raised")
                         Spacer()
                         Text("\(self.store.attentionItems.count)").monospacedDigit()
                     }.padding(.vertical, 9)
@@ -156,6 +159,8 @@ struct WorkspaceContentView: View {
                     Spacer()
                     Button("Tasks", systemImage: "checklist") { showingTasks = true }
                 }.buttonStyle(.plain).padding(.bottom, 9)
+                Button("Activity", systemImage: "waveform.path.ecg") { showingActivity = true }
+                    .buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 9)
                 Button("Deliverables", systemImage: "tray.full") { self.showingDeliverables = true }
                     .buttonStyle(.plain)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -203,19 +208,33 @@ struct WorkspaceContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                WorkspaceSwitcher(manager: self.manager, showingPairing: self.$showingPairing)
-                Divider()
-                self.workspaceTools
-                Divider()
-                SessionListView(store: self.store) { self.showingActivity = true }
-                Divider()
+        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
+            Group {
                 #if os(iOS)
-                ConnectionStatusView(store: store)
+                SessionListView(store: self.store,
+                    showActivity: { self.showingActivity = true },
+                    showNeedsYou: { self.showingNeedsYou = true }) {
+                        WorkspaceSwitcher(manager: self.manager, showingPairing: self.$showingPairing)
+                        Divider()
+                        self.workspaceTools
+                        Divider()
+                    } navigationFooter: {
+                        ConnectionStatusView(store: store)
+                        Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
+                            .buttonStyle(.plain).padding(10)
+                    }
+                #else
+                VStack(spacing: 0) {
+                    WorkspaceSwitcher(manager: self.manager, showingPairing: self.$showingPairing)
+                    Divider()
+                    self.workspaceTools
+                    Divider()
+                    SessionListView(store: self.store, showActivity: { self.showingActivity = true }, showNeedsYou: { self.showingNeedsYou = true })
+                    Divider()
+                    Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
+                        .buttonStyle(.plain).padding(10)
+                }
                 #endif
-                Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
-                    .buttonStyle(.plain).padding(10)
             }
             .navigationTitle("Cast")
                 #if os(iOS)
@@ -224,13 +243,6 @@ struct WorkspaceContentView: View {
                 // view itself lands nowhere at all, which is why iOS had no bell and no New
                 // Chat. Kept to two items so the iPhone bar does not crowd the title.
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            self.store.openScratchSession()
-                        } label: {
-                            Label("New Chat", systemImage: "square.and.pencil")
-                        }
-                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             self.showingNotificationCenter = true
@@ -245,15 +257,23 @@ struct WorkspaceContentView: View {
                 #endif
         } detail: {
             if self.store.selectedSessionKey != nil {
-                ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.$showingSideChat)
+                ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.sideChatPresentation)
             } else {
                 ContentUnavailableView(
                     "Pick a conversation",
                     systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Sessions on this gateway appear in the sidebar."))
+                    description: Text("Create a chat or keep an existing conversation from Manage Chats."))
             }
         }
-        .modifier(SideChatInspector(store: self.store, isPresented: self.$showingSideChat))
+        .onChange(of: store.detailNavigationRequest) { _, _ in
+            preferredCompactColumn = .detail
+        }
+        #if os(iOS)
+        .onChange(of: preferredCompactColumn) { _, column in
+            if column == .sidebar { store.selectFromSidebar(nil) }
+        }
+        #endif
+        .modifier(SideChatInspector(store: self.store, isPresented: self.sideChatPresentation))
         #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .automatic) {
@@ -278,14 +298,7 @@ struct WorkspaceContentView: View {
             ToolbarItem(placement: .automatic) {
                 PresenceMenu(store: self.store)
             }
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    self.store.openScratchSession()
-                } label: {
-                    Label("New Chat", systemImage: "square.and.pencil")
-                }
-                .keyboardShortcut("n", modifiers: .command)
-            }
+
         }
         #endif
         .sheet(isPresented: $showingDownloads) { DeliverablesView(store: store, startsWithDownloads: true) }
@@ -399,7 +412,7 @@ private struct AggregateUnreadButton: View {
                 .monospacedDigit()
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Unread agent replies")
+        .accessibilityLabel("Unread conversations")
         .accessibilityValue("\(self.count)")
         .accessibilityHint("Opens the unread notifications panel.")
     }

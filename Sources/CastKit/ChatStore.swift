@@ -1,3 +1,4 @@
+import CryptoKit
 // Cast — MainActor state hub: connection, session list, transcript, streaming, send.
 import Foundation
 import Observation
@@ -338,6 +339,19 @@ public final class ChatStore {
     /// Entry time of the current `.connecting` state, or nil in any other state.
     @ObservationIgnored private var connectingSince: Date?
     public private(set) var sessions: [SessionRow] = []
+    public private(set) var selectedProjectName: String?
+    /// Navigation intent is independent of content identity (same-row taps still open detail).
+    public private(set) var detailNavigationRequest = 0
+    public var projectOverviewPresented = false
+    public var sidebarFilter: SidebarViewFilter = .all
+    public private(set) var projectSyncNotice: String?
+    private var projectCatalogNames: [String] = []
+    private var projectMutationToken: UUID?
+    private var projectOrganizationRevision = 0
+    private var pendingProjectChatKeys: [String: String] = [:]
+    @ObservationIgnored private var projectCatalogRefreshGeneration: Int?
+    @ObservationIgnored private var lastProjectCatalogRefresh: Date?
+    public var projectMutationInFlight: Bool { projectMutationToken != nil }
     public private(set) var mainSessionKey: String?
     public private(set) var gatewayMethods: Set<String> = []
     @ObservationIgnored private var gatewayMethodsKnown = false
@@ -420,6 +434,7 @@ public final class ChatStore {
     public private(set) var notificationRecords: [NotificationDeliveryRecord] = []
     /// Updated by the workspace scene, not by a socket event or selected-session cache.
     public var isNotificationContextVisible = true
+    public var isSelectedConversationVisible: Bool { self.isNotificationContextVisible && !self.projectOverviewPresented }
     public private(set) var remotePushEnabled = false
     public private(set) var remotePushReady = false
     public private(set) var remotePushManagedElsewhere = false
@@ -436,7 +451,9 @@ public final class ChatStore {
     public private(set) var sidebarPreferences = SidebarPreferences()
     public private(set) var lastHiddenSessionKey: String?
     public var showHiddenSessions = false
-    @ObservationIgnored private let sidebarPreferencesStore: AtomicJSONLedgerStore<SidebarPreferences>
+    @ObservationIgnored private var sidebarPreferencesStore: AtomicJSONLedgerStore<SidebarPreferences>
+    @ObservationIgnored private var sidebarPreferencesRoot: URL
+    @ObservationIgnored private var sidebarPreferencesWritable = true
     /// One-line, non-modal "a gateway update is available" notice; nil when current.
     public private(set) var updateNotice: String?
     /// Live progress cards keyed by sessionKey. Populated on session open and on
@@ -482,8 +499,24 @@ public final class ChatStore {
         }
         set {
             let oldValue = self.selectedSessionKeyStorage
+            if oldValue != newValue, let side = self.sideChat, !SessionKeyMatcher.matches(side.sourceSessionKey, newValue) {
+                // Hide presentation only; keep an active side-chat request alive and recoverable.
+                self.isSideChatPresented = false
+            }
+            let wasOverview = self.projectOverviewPresented
             self.withMutation(keyPath: \.selectedSessionKey) { self.selectedSessionKeyStorage = newValue }
-            guard oldValue != self.selectedSessionKeyStorage else { return }
+            if let newValue {
+                self.selectedProjectName = self.projectName(for: newValue)
+                self.projectOverviewPresented = false
+            }
+            guard oldValue != self.selectedSessionKeyStorage else {
+                if wasOverview, let newValue {
+                    self.detailNavigationRequest &+= 1
+                    self.acknowledgeConversationOpen(newValue)
+                }
+                return
+            }
+            if newValue != nil { self.detailNavigationRequest &+= 1 }
             self.beginOpeningSelectedSession(previous: oldValue)
             self.publishCachedAgentIdentityAndRefresh()
         }
@@ -493,27 +526,397 @@ public final class ChatStore {
     private var client: GatewayClient?
     public private(set) var sideChat: SideChat?
 
+    @ObservationIgnored private var sideChatArchiveStore: AtomicJSONLedgerStore<SideChatArchive>!
+    @ObservationIgnored private var sideChatRoot: URL!
+    @ObservationIgnored private var sideChatInstanceID = UUID()
+    @ObservationIgnored private var sideChatArchiveWritable = true
+    private var sideChatArchive = SideChatArchive()
+    private var sideChatStorageError: String?
+    private var sideChatRefreshError: String?
+    private var sideChatArchiveSyncError: String?
+    @ObservationIgnored private var sideChatArchiveSyncRunning = false
+    @ObservationIgnored private var sideChatArchiveSyncRequested = false
+    public var sideChatArchiveSyncNotice: String {
+        sideChatArchiveSyncError ?? "Archive sync runs when connected to your gateway account. Auto-archive applies on this device."
+    }
+    public var sideChatDiscoveryError: String? { sideChatStorageError ?? sideChatRefreshError ?? sideChatArchiveSyncError }
+    public var isSideChatPresented = false {
+        didSet {
+            sideChatArchive.isPresented = isSideChatPresented
+            persistSideChatArchive()
+        }
+    }
+    public var savedSideChats: [SavedSideChat] { sideChats(archived: false) }
+    public var archivedSideChats: [SavedSideChat] { sideChats(archived: true) }
+    public private(set) var lastArchivedSideChatKey: String?
+    public var sideChatAutoArchiveDays: Int { sideChatArchive.autoArchiveDays ?? 0 }
+
+    private func sideChats(archived: Bool) -> [SavedSideChat] {
+        sideChatArchive.chats.values.filter {
+            SavedSideChat.isSideChatKey($0.sessionKey) && sideChatArchive.isArchived($0.sessionKey) == archived
+        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    public func canArchiveSideChat(_ key: String) -> Bool {
+        guard SavedSideChat.isSideChatKey(key), sideChatArchive.chats[key]?.sessionKey == key else { return false }
+        guard sideChatArchive.presentation?[key]?.hasActiveRun != true,
+              sessions.first(where: { $0.key == key })?.hasActiveRun != true else { return false }
+        return sideChat?.sessionKey != key || sideChat?.isBusy != true
+    }
+
+    // Persist user-visible transitions before publishing. A failed write must not claim success.
+    @discardableResult private func saveSideChatTransition(_ candidate: SideChatArchive) -> Bool {
+        guard sideChatArchiveWritable else {
+            sideChatStorageError = "Couldn’t update archived chats because saved side chats could not be read."
+            return false
+        }
+        do {
+            try sideChatArchiveStore.save(candidate)
+            sideChatArchive = candidate
+            sideChatStorageError = nil
+            return true
+        } catch {
+            sideChatStorageError = "Couldn’t save archived chats on this device. Please try again."
+            return false
+        }
+    }
+
+    public func archiveSideChat(_ key: String) {
+        guard canArchiveSideChat(key) else { return }
+        var candidate = sideChatArchive
+        candidate.setArchived(.manual, key: key, now: Date().timeIntervalSince1970 * 1000)
+        candidate.queueArchiveSync(true, key: key)
+        if candidate.selectedKey == key { candidate.isPresented = false }
+        guard saveSideChatTransition(candidate) else { return }
+        lastArchivedSideChatKey = key
+        Task { await syncSideChatArchives() }
+        if sideChat?.sessionKey == key { isSideChatPresented = false }
+    }
+
+    public func restoreArchivedSideChat(_ key: String) {
+        guard SavedSideChat.isSideChatKey(key), sideChatArchive.chats[key]?.sessionKey == key else { return }
+        var candidate = sideChatArchive
+        candidate.setArchived(nil, key: key, now: Date().timeIntervalSince1970 * 1000)
+        candidate.queueArchiveSync(false, key: key)
+        guard saveSideChatTransition(candidate) else { return }
+        if lastArchivedSideChatKey == key { lastArchivedSideChatKey = nil }
+        Task { await syncSideChatArchives() }
+    }
+
+    public func undoArchiveSideChat() {
+        if let key = lastArchivedSideChatKey { restoreArchivedSideChat(key) }
+    }
+    public func dismissSideChatArchiveUndo() { lastArchivedSideChatKey = nil }
+
+    public func setSideChatAutoArchiveDays(_ days: Int) {
+        guard [0, 30, 60, 90].contains(days) else { return }
+        var candidate = sideChatArchive
+        candidate.autoArchiveDays = days == 0 ? nil : days
+        guard saveSideChatTransition(candidate), days != 0 else { return }
+        Task { await refreshSideChats() }
+    }
+
+    func archiveInactiveSideChats(rows: [SessionRow], now: Double) {
+        var protectedKeys = Set(rows.filter { isSessionPinned($0.key) }.map(\.key))
+        if let chat = sideChat, isSideChatPresented || chat.isBusy { protectedKeys.insert(chat.sessionKey) }
+        let keys = sideChatArchive.inactiveKeys(rows: rows, now: now, protectedKeys: protectedKeys)
+        guard !keys.isEmpty else { return }
+        var candidate = sideChatArchive
+        for key in keys { candidate.setArchived(.inactive, key: key, now: now) }
+        _ = saveSideChatTransition(candidate)
+    }
+
+    private func noteSideChatActivity(_ key: String) {
+        guard SavedSideChat.isSideChatKey(key), sideChatArchive.chats[key] != nil else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let previous = sideChatArchive.presentation?[key]
+        // Streaming deltas are activity, not a reason to synchronously rewrite JSON per token.
+        guard previous?.archived == .inactive || now - (previous?.lastUsedAt ?? 0) >= 60_000 else { return }
+        sideChatArchive.touch(key, now: now)
+        persistSideChatArchive()
+    }
     public var supportsSideChat: Bool {
         gatewayMethods.isSuperset(of: ["sessions.create", "chat.send", "chat.history", "sessions.messages.subscribe"])
     }
 
-    public func openSideChat(context: String) {
-        guard sideChat == nil, supportsSideChat, let key = selectedSessionKey else { return }
-        let workspaceID = profile.id
-        let gatewayURL = profile.gatewayURL
-        sideChat = SideChat(sourceSessionKey: key, context: context) { [weak self] method, params in
-            guard let self, self.profile.id == workspaceID, self.profile.gatewayURL == gatewayURL,
+    private func persistSideChatArchive() {
+        guard sideChatArchiveWritable else { return }
+        do { try sideChatArchiveStore?.save(sideChatArchive); sideChatStorageError = nil }
+        catch { sideChatStorageError = "Couldn’t save side chats on this device. \(error.localizedDescription)" }
+    }
+
+    private func restoreSideChatArchive() {
+        sideChatArchiveSyncError = nil
+
+        sideChatArchiveStore = SideChatArchive.store(root: sideChatRoot, profile: profile)
+        do { sideChatArchive = try sideChatArchiveStore.load(defaultValue: SideChatArchive()); sideChatArchiveWritable = true; sideChatStorageError = nil; sideChatRefreshError = nil }
+        catch { sideChatArchiveWritable = false; sideChatArchive = SideChatArchive(); sideChatStorageError = "Couldn’t read saved side chats. Refresh to rediscover gateway conversations." }
+        sideChat = nil
+        lastArchivedSideChatKey = nil
+        if let key = sideChatArchive.selectedKey, let saved = sideChatArchive.chats[key], saved.sessionKey == key, SavedSideChat.isSideChatKey(key) {
+            sideChat = makeSideChat(saved: saved)
+        }
+        isSideChatPresented = sideChat != nil && sideChatArchive.isPresented && !sideChatArchive.isArchived(sideChatArchive.selectedKey ?? "")
+    }
+
+    private func makeSideChat(saved: SavedSideChat) -> SideChat {
+        let identity = profile
+        let instanceID = UUID()
+        sideChatInstanceID = instanceID
+        return SideChat(saved: saved, persist: { [weak self] snapshot in
+            guard let self, self.profile.id == identity.id, self.profile.gatewayURL == identity.gatewayURL,
+                  self.sideChatInstanceID == instanceID, self.sideChat?.sessionKey == snapshot.sessionKey else { return }
+            guard self.sideChatArchiveWritable else { throw CocoaError(.fileReadCorruptFile) }
+            let previous = self.sideChatArchive.chats[snapshot.sessionKey]
+            if previous?.draft != snapshot.draft || previous?.sendID != snapshot.sendID || previous?.hasSent != snapshot.hasSent {
+                self.sideChatArchive.touch(snapshot.sessionKey, now: Date().timeIntervalSince1970 * 1000)
+            }
+            self.sideChatArchive.chats[snapshot.sessionKey] = snapshot
+            do {
+                try self.sideChatArchiveStore.save(self.sideChatArchive)
+                self.sideChatStorageError = nil
+            } catch {
+                self.sideChatStorageError = "Couldn’t save side chats on this device. \(error.localizedDescription)"
+                throw error
+            }
+        }, request: { [weak self] method, params in
+            guard let self, self.profile.id == identity.id, self.profile.gatewayURL == identity.gatewayURL,
                   let client = self.client, case .connected = self.connectionState else {
                 throw GatewayTimeoutError(context: "Reconnect to use side chat")
             }
-            return try await client.request(method: method, params: params)
+            let generation = self.clientGeneration
+            let data = try await client.request(method: method, params: params)
+            guard generation == self.clientGeneration, self.profile.id == identity.id,
+                  self.profile.gatewayURL == identity.gatewayURL else { throw CancellationError() }
+            return data
+        })
+    }
+
+    public func openSideChat(context: String) {
+        guard sideChat?.isBusy != true, supportsSideChat, let key = selectedSessionKey else { return }
+        let sessionKey = "agent:\(SessionKeyMatcher.agentID(from: key) ?? "main"):cast-side-\(UUID().uuidString.lowercased())"
+        let saved = SavedSideChat(sessionKey: sessionKey, sourceSessionKey: key,
+                                  context: String(context.prefix(16000)), title: "New side chat", created: false)
+        sideChatArchive.chats[sessionKey] = saved
+        sideChatArchive.touch(sessionKey, now: Date().timeIntervalSince1970 * 1000)
+        resumeSideChat(sessionKey)
+    }
+
+    public func resumeSideChat(_ key: String) {
+        guard SavedSideChat.isSideChatKey(key), let saved = sideChatArchive.chats[key], saved.sessionKey == key else { return }
+        if sideChat?.sessionKey != key, sideChat?.isBusy == true {
+            sideChatRefreshError = "Stop the active side chat before opening another."
+            return
         }
+        var candidate = sideChatArchive
+        let restoringManualArchive = candidate.presentation?[key]?.archived == .manual
+        candidate.touch(key, now: Date().timeIntervalSince1970 * 1000, restore: true)
+        if restoringManualArchive { candidate.queueArchiveSync(false, key: key) }
+        guard saveSideChatTransition(candidate) else { return }
+        if restoringManualArchive { Task { await syncSideChatArchives() } }
+        if sideChat?.sessionKey == key { isSideChatPresented = true; return }
+        guard sideChat?.isBusy != true else {
+            sideChatRefreshError = "Stop the active side chat before opening another."
+            return
+        }
+        if let previous = sideChat { Task { await previous.detach() } }
+        sideChat = makeSideChat(saved: saved)
+        sideChatArchive.selectedKey = key
+        isSideChatPresented = true
+        if let chat = sideChat { Task { await chat.reconnect() } }
     }
 
     public func closeSideChat() {
-        guard let chat = sideChat, !chat.isBusy else { return }
-        sideChat = nil
-        Task { await chat.detach() }
+        guard sideChat?.isBusy != true else { return }
+        isSideChatPresented = false
+        // Closing hides the pane; it never deletes the gateway conversation or locator.
+    }
+
+    func discoverSideChats(_ rows: [SessionRow]) {
+        for row in rows where SavedSideChat.isSideChatKey(row.key) {
+            sideChatArchive.observe(row, now: Date().timeIntervalSince1970 * 1000)
+            guard sideChatArchive.chats[row.key] == nil else { continue }
+            sideChatArchive.chats[row.key] = SavedSideChat(sessionKey: row.key,
+                // Build17 did not record the parent locator. Keep the exact side key for
+                // agent scoping; never invent a parent or redirect navigation to main.
+                sourceSessionKey: row.key,
+                context: "", title: row.derivedTitle ?? row.displayName ?? "Saved side chat", created: true, hasSent: true)
+        }
+        persistSideChatArchive()
+    }
+
+    private func syncSideChatArchives() async {
+        guard let client, case .connected = connectionState else {
+            sideChatArchiveSyncError = "Archive changes are saved on this device and will sync when connected."
+            return
+        }
+        guard gatewayMethods.isSuperset(of: ["users.self", "users.prefs.get", "users.prefs.set"]) else {
+            sideChatArchiveSyncError = "This gateway cannot sync personal archives. Changes remain on this device."
+            return
+        }
+        await syncSideChatArchives { method, params in
+            try await client.request(method: method, params: params)
+        }
+    }
+
+    func syncSideChatArchives(request: (String, [String: Any?]) async throws -> Data) async {
+        if sideChatArchiveSyncRunning { sideChatArchiveSyncRequested = true; return }
+        sideChatArchiveSyncRunning = true
+        let generation = clientGeneration
+        let workspace = profile
+        defer {
+            sideChatArchiveSyncRunning = false
+            if sideChatArchiveSyncRequested {
+                sideChatArchiveSyncRequested = false
+                Task { await self.syncSideChatArchives() }
+            }
+        }
+        func current() -> Bool {
+            generation == clientGeneration && workspace.id == profile.id && workspace.gatewayURL == profile.gatewayURL && !Task.isCancelled
+        }
+        do {
+            let identityData = try await request("users.self", [:])
+            guard current() else { return }
+            let identity = try JSONSerialization.jsonObject(with: identityData) as? [String: Any]
+            guard let account = (identity?["profile"] as? [String: Any])?["id"] as? String, !account.isEmpty else {
+                throw GatewayTimeoutError(context: "A durable gateway account is required")
+            }
+            guard sideChatArchive.archiveSyncProfileID == nil || sideChatArchive.archiveSyncProfileID == account else {
+                sideChatArchiveSyncRequested = false
+                sideChatArchiveSyncError = "Archive sync paused: this workspace is now signed in to a different gateway account."
+                return
+            }
+            var bound = sideChatArchive
+            bound.archiveSyncProfileID = account
+            guard saveSideChatTransition(bound) else { return }
+            // Bound retries, CAS, and restore tombstones prevent another device's changes being lost.
+            for _ in 0..<3 {
+                sideChatArchiveSyncRequested = false
+                let data = try await request("users.prefs.get", ["keys": [SideChatArchive.preferenceKey]])
+                guard current() else { return }
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard response?["status"] as? String == "ok", let entries = response?["entries"] as? [String: Any] else {
+                    throw GatewayTimeoutError(context: "Personal preferences are unavailable")
+                }
+                let raw = entries[SideChatArchive.preferenceKey]
+                let remote: [String: Bool]
+                if let raw {
+                    // Reject scalar/null/array values before Foundation serialization, which
+                    // can raise an uncatchable ObjC exception for a top-level scalar.
+                    guard let object = raw as? [String: Any], JSONSerialization.isValidJSONObject(object) else {
+                        throw GatewayTimeoutError(context: "Invalid archive preferences")
+                    }
+                    remote = try JSONDecoder().decode([String: Bool].self, from: JSONSerialization.data(withJSONObject: object))
+                    guard remote.keys.allSatisfy(SavedSideChat.isSideChatKey) else {
+                        throw GatewayTimeoutError(context: "Invalid archive preferences")
+                    }
+                } else { remote = [:] }
+                let pending = sideChatArchive.archiveSyncPending ?? [:]
+                let merged = sideChatArchive.mergedArchivePreferences(remote)
+                if merged != remote {
+                    // Gateway preference values are limited to 4 KiB. Fail visibly, never truncate.
+                    guard try JSONSerialization.data(withJSONObject: merged).count <= 4096 else {
+                        // Still receive remote changes without acknowledging local writes or
+                        // consuming a legacy migration that did not fit on the server.
+                        var candidate = sideChatArchive
+                        let migrated = candidate.archiveSyncMigrated
+                        candidate.applyArchivePreferences(remote, sent: [:], now: Date().timeIntervalSince1970 * 1000)
+                        candidate.archiveSyncMigrated = migrated
+                        guard saveSideChatTransition(candidate) else { return }
+                        sideChatArchiveSyncRequested = false
+                        sideChatArchiveSyncError = "Archive sync storage is full. Recent changes remain on this device."
+                        return
+                    }
+                    let resultData = try await request("users.prefs.set", [
+                        "entries": [SideChatArchive.preferenceKey: merged],
+                        "expectedEntries": [SideChatArchive.preferenceKey: raw] as [String: Any?]])
+                    guard current() else { return }
+                    let result = try JSONSerialization.jsonObject(with: resultData) as? [String: Any]
+                    if result?["status"] as? String == "conflict" { continue }
+                    guard result?["status"] as? String == "ok" else {
+                        throw GatewayTimeoutError(context: "Personal preferences are unavailable")
+                    }
+                }
+                var candidate = sideChatArchive
+                candidate.applyArchivePreferences(merged, sent: pending, now: Date().timeIntervalSince1970 * 1000)
+                guard saveSideChatTransition(candidate) else { return }
+                if let key = sideChat?.sessionKey, candidate.isArchived(key), sideChat?.isBusy != true { isSideChatPresented = false }
+                sideChatArchiveSyncError = nil
+                if (candidate.archiveSyncPending ?? [:]).isEmpty && !sideChatArchiveSyncRequested { return }
+            }
+            sideChatArchiveSyncRequested = false
+            sideChatArchiveSyncError = "Archive sync is waiting for other changes. Refresh to retry."
+        } catch {
+            guard current() else { return }
+            sideChatArchiveSyncError = "Couldn’t sync personal archives. Changes remain on this device; refresh to retry."
+        }
+    }
+
+    public func refreshSideChats() async {
+        await syncSideChatArchives()
+        guard let client, case .connected = connectionState else { return }
+        await refreshSideChats { method, params in
+            try await client.request(method: method, params: params)
+        }
+    }
+
+    func refreshSideChats(request: (String, [String: Any?]) async throws -> Data) async {
+        let generation = clientGeneration
+        do {
+            // A separate filtered query finds legacy side chats beyond the main list's 60 rows.
+            // Page until exhausted; never interpret absence as deletion.
+            var offset = 0
+            var observed: [SessionRow] = []
+            var allPagesConfirmed = true
+            while offset < 10000 {
+                let data = try await request("sessions.list", [
+                    "search": "cast-side-", "includeUnknown": true, "includeGlobal": false,
+                    "includeDerivedTitles": true, "limit": 100, "offset": offset])
+                guard generation == clientGeneration, !Task.isCancelled else { return }
+                let list = try decoder.decode(SessionsListResponse.self, from: data)
+                discoverSideChats(list.sessions)
+                observed.append(contentsOf: list.sessions)
+                if list.truncated == true {
+                    sideChatRefreshError = "The side-chat list is incomplete. No chats were automatically archived."
+                    return
+                }
+                if list.hasMore == true {
+                    guard let next = list.nextOffset, next > offset, next < 10000 else {
+                        sideChatRefreshError = "Couldn’t finish refreshing side chats. No chats were automatically archived."
+                        return
+                    }
+                    offset = next
+                    continue
+                }
+                if list.hasMore == false {
+                    let totalObserved = Set(observed.map(\.key)).count
+                    guard list.nextOffset == nil, list.totalCount.map({ $0 >= 0 && $0 <= totalObserved }) ?? true else {
+                        sideChatRefreshError = "The side-chat list is incomplete. No chats were automatically archived."
+                        return
+                    }
+                    sideChatRefreshError = nil
+                    if allPagesConfirmed {
+                        archiveInactiveSideChats(rows: observed, now: Date().timeIntervalSince1970 * 1000)
+                    } else if sideChatAutoArchiveDays != 0 {
+                        sideChatRefreshError = "Auto-archive skipped: the gateway didn’t confirm a complete side-chat list."
+                    }
+                    return
+                }
+                // Older gateways may omit pagination metadata. Preserve discovery, but
+                // a short page alone is not enough evidence for automatic cleanup.
+                allPagesConfirmed = false
+                if list.sessions.count < 100 {
+                    sideChatRefreshError = sideChatAutoArchiveDays == 0 ? nil :
+                        "Auto-archive skipped: the gateway didn’t confirm a complete side-chat list."
+                    return
+                }
+                offset += list.sessions.count
+            }
+            sideChatRefreshError = "Showing the first 10,000 matching conversations."
+        } catch {
+            guard generation == clientGeneration else { return }
+            sideChatRefreshError = "Couldn’t refresh saved side chats. Existing entries are still available."
+        }
     }
 
     @ObservationIgnored
@@ -541,6 +944,16 @@ public final class ChatStore {
     private var sessionsNeedingHistoryRefresh: Set<String> = []
     @ObservationIgnored
     private let readReceiptQueue = ReadReceiptQueue()
+    @ObservationIgnored
+    private var operationSessions: [String: SessionRow] = [:]
+    @ObservationIgnored
+    private var unreadInventoryInFlight = false
+    @ObservationIgnored
+    private var unreadInventoryTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var lastUnreadInventoryAttempt: Date?
+    @ObservationIgnored
+    private var unreadEventRevision = 0
     @ObservationIgnored
     private var pendingReadReceipts: [String: ReadReceiptSnapshot] = [:]
 
@@ -670,10 +1083,27 @@ public final class ChatStore {
         let sidebarRoot = operationsRoot.appendingPathComponent("sidebar", isDirectory: true)
             .appendingPathComponent(Data(profile.id.utf8).base64EncodedString()
                 .replacingOccurrences(of: "/", with: "_"))
-        self.sidebarPreferencesStore = AtomicJSONLedgerStore(
-            fileURL: sidebarRoot.appendingPathComponent("preferences.json"))
-        self.sidebarPreferences = (try? self.sidebarPreferencesStore.load(defaultValue: SidebarPreferences()))
-            ?? SidebarPreferences()
+        self.sidebarPreferencesRoot = operationsRoot
+        self.sidebarPreferencesStore = Self.personalSidebarStore(root: operationsRoot, profile: profile)
+        let legacy = AtomicJSONLedgerStore<SidebarPreferences>(fileURL: sidebarRoot.appendingPathComponent("preferences.json"))
+        if FileManager.default.fileExists(atPath: self.sidebarPreferencesStore.fileURL.path) {
+            do { self.sidebarPreferences = try self.sidebarPreferencesStore.load(defaultValue: SidebarPreferences()) }
+            catch { self.sidebarPreferences = SidebarPreferences(); self.sidebarPreferencesWritable = false }
+        } else {
+            let marker = sidebarRoot.appendingPathComponent("personal-migration-gateway.txt")
+            let previousGateway = try? String(contentsOf: marker, encoding: .utf8)
+            let mayMigrate = previousGateway == nil || previousGateway == profile.gatewayURL.absoluteString
+            var restored = SidebarPreferences()
+            do { if mayMigrate { restored = try legacy.load(defaultValue: SidebarPreferences()) } }
+            catch { self.sidebarPreferencesWritable = false }
+            self.sidebarPreferences = restored
+            do {
+                if !self.sidebarPreferencesWritable { throw ProjectSidebarError.invalidResponse }
+                try self.sidebarPreferencesStore.save(restored)
+                try FileManager.default.createDirectory(at: sidebarRoot, withIntermediateDirectories: true)
+                if previousGateway == nil { try profile.gatewayURL.absoluteString.write(to: marker, atomically: true, encoding: .utf8) }
+            } catch { /* Keep legacy evidence; persistence failures surface on the first edit. */ }
+        }
         self.sendOutbox = SendOutbox(root: sidebarRoot.appendingPathComponent("Outbox"))
         self.deliverableFiles = DeliverableFileCache(root: sidebarRoot.appendingPathComponent("Downloads"))
         self.deliverableStore = AtomicJSONLedgerStore(fileURL: sidebarRoot.appendingPathComponent("deliverables.json"))
@@ -706,14 +1136,475 @@ public final class ChatStore {
         self.mutedSessionKeys = self.muteLedger.mutedSessionKeys
         self.numericUnreadCount = (unread.workspaces[profile.id]?.sessions ?? [:])
             .filter { !self.sidebarPreferences.isHidden($0.key) }
-            .values.reduce(0) { $0 + $1.count }
-        self.unreadCountsBySession = unread.workspaces[profile.id]?.sessions.mapValues(\.count) ?? [:]
+            .values.reduce(0) { $0 + ($1.count > 0 ? 1 : 0) }
+        self.unreadCountsBySession = unread.workspaces[profile.id]?.sessions.mapValues { min(1, $0.count) } ?? [:]
         self.notificationRecords = notifications.records
+        self.sideChatRoot = operationsRoot
+        self.restoreSideChatArchive()
+    }
+
+    private static func personalSidebarStore(root: URL, profile: WorkspaceProfile) -> AtomicJSONLedgerStore<SidebarPreferences> {
+        let identity = profile.id + "\n" + profile.gatewayURL.absoluteString
+        let component = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        return AtomicJSONLedgerStore(fileURL: root.appendingPathComponent("personal-chats").appendingPathComponent(component).appendingPathComponent("preferences.json"), ownerOnly: true)
+    }
+
+    // MARK: - Personal chat list
+
+    public var newPersonalChatPresented = false
+    public private(set) var chatSidebarSyncNotice: String?
+    public private(set) var lastChatCleanupKey: String?
+    private var chatSidebarAccountMismatch = false
+    private var chatSidebarSyncRunning = false
+    private var chatSidebarSyncRequested = false
+
+    public func chatTitle(_ row: SessionRow) -> String {
+        if let title = sidebarPreferences.chat(row.key).title, !title.isEmpty { return title }
+        if SessionKeyMatcher.matches(row.key, mainSessionKey ?? "agent:main:main") { return "General" }
+        if let title = row.label, !title.isEmpty { return title }
+        if let title = sideChatArchive.chats[row.key]?.title { return title }
+        return SidebarGrouper.displayTitle(for: row, mainSessionKey: mainSessionKey)
+    }
+
+    private var personalChatInventory: [SessionRow] {
+        guard !chatSidebarAccountMismatch else { return [] }
+        var rows = Dictionary(projectInventoryRows.map { ($0.key, $0) }, uniquingKeysWith: { _, new in new })
+        for saved in savedSideChats + archivedSideChats where rows[saved.sessionKey] == nil {
+            rows[saved.sessionKey] = SessionRow(key: saved.sessionKey, kind: "direct", displayName: saved.title,
+                derivedTitle: nil, lastMessagePreview: nil, channel: nil, updatedAt: nil, unread: nil,
+                pinned: nil, hasActiveRun: nil, model: nil)
+        }
+        let keys = Set((sidebarPreferences.chats ?? [:]).keys).union(sidebarPreferences.pinnedKeys)
+        for key in keys where rows[key] == nil {
+            let pref = sidebarPreferences.chat(key)
+            guard pref.kept || pref.pinned || pref.hidden || pref.archived else { continue }
+            rows[key] = SessionRow(key: key, kind: "direct", displayName: pref.title,
+                derivedTitle: nil, lastMessagePreview: nil, channel: nil, updatedAt: nil, unread: nil,
+                pinned: nil, hasActiveRun: nil, model: nil)
+        }
+        return rows.values.filter { row in
+            let kind = SidebarGrouper.category(for: row, mainSessionKey: mainSessionKey)
+            return row.isBackground != true && row.spawnedBy == nil && kind != .automation && kind != .task
+        }
+    }
+
+    public var manageableChats: [SessionRow] {
+        personalChatInventory.sorted { chatTitle($0).localizedStandardCompare(chatTitle($1)) == .orderedAscending }
+    }
+
+    public func isPersonalChat(_ row: SessionRow) -> Bool {
+        let pref = sidebarPreferences.chat(row.key)
+        return pref.kept || pref.pinned
+    }
+
+    public func isChatArchived(_ key: String) -> Bool {
+        sidebarPreferences.chat(key).archived || sideChatArchive.isArchived(key)
+    }
+
+    public var personalChats: [SessionRow] {
+        let included = Set((sidebarPreferences.chats ?? [:]).filter { $0.value.kept || $0.value.pinned }.keys)
+            .union(sidebarPreferences.pinnedKeys.map { SessionKeyMatcher.canonical($0) })
+        return personalChatInventory.filter { row in
+            included.contains(SessionKeyMatcher.canonical(row.key)) && row.archived != true && !isSessionHidden(row.key) && !isChatArchived(row.key)
+        }.sorted { a, b in
+            let ap = sidebarPreferences.chat(a.key), bp = sidebarPreferences.chat(b.key)
+            if ap.pinned != bp.pinned { return ap.pinned }
+            if ap.pinned, (ap.rank ?? 0) != (bp.rank ?? 0) { return (ap.rank ?? 0) < (bp.rank ?? 0) }
+            let comparison = chatTitle(a).localizedStandardCompare(chatTitle(b))
+            return comparison == .orderedSame ? a.key < b.key : comparison == .orderedAscending
+        }
+    }
+
+    public func updatePersonalChat(_ key: String, _ edit: (inout ChatSidebarPreference) -> Void) {
+        guard !chatSidebarAccountMismatch else { showError("Reconnect the original account or add this account as a separate workspace to organize its chats."); return }
+        var preferences = sidebarPreferences
+        preferences.updateChat(key, edit)
+        if preferences.chat(key).title == nil, let row = projectInventoryRows.first(where: { SessionKeyMatcher.matches($0.key, key) }) {
+            let title = chatTitle(row)
+            preferences.updateChat(key) { $0.title = String(title.prefix(100)) }
+        }
+        guard saveSidebarPreferences(preferences) else { return }
+        Task { await syncChatSidebar() }
+    }
+
+    public func keepPersonalChat(_ key: String) {
+        updatePersonalChat(key) { $0.kept = true; $0.hidden = false; $0.archived = false }
+        if SavedSideChat.isSideChatKey(key), sideChatArchive.isArchived(key) { restoreArchivedSideChat(key) }
+    }
+
+    public func restorePersonalChat(_ row: SessionRow) async throws {
+        if row.archived != true { keepPersonalChat(row.key); return }
+        guard let client, case .connected = connectionState, gatewayMethods.contains("sessions.patch") else { throw ProjectSidebarError.unavailable }
+        try await restorePersonalChat(row, request: { try await client.request(method: $0, params: $1) })
+    }
+
+    func restorePersonalChat(_ row: SessionRow, request: (String, [String: Any?]) async throws -> Data) async throws {
+        guard sidebarPreferencesWritable, !chatSidebarAccountMismatch else { throw ProjectSidebarError.unavailable }
+        if row.archived == true {
+            guard let identity = row.sessionId else { throw ProjectSidebarError.missingIdentity }
+            let generation = clientGeneration
+            let result = try await request("sessions.patch", ["key": row.key, "expectedSessionId": identity, "archived": false])
+            guard generation == clientGeneration, !Task.isCancelled else { throw ProjectSidebarError.connectionChanged }
+            guard (try JSONSerialization.jsonObject(with: result) as? [String: Any])?["ok"] as? Bool == true else { throw ProjectSidebarError.invalidResponse }
+            let current = operationSessions[row.key] ?? sessions.first { $0.key == row.key } ?? row
+            guard current.sessionId == identity else { throw ProjectSidebarError.connectionChanged }
+            // Apply only the confirmed archive flag to the freshest same-incarnation row.
+            var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as! [String: Any]
+            object["archived"] = false
+            let restored = try decoder.decode(SessionRow.self, from: JSONSerialization.data(withJSONObject: object))
+            projectOrganizationRevision &+= 1
+            unreadEventRevision &+= 1
+            operationSessions[row.key] = restored
+            if let index = sessions.firstIndex(where: { $0.key == row.key }) { sessions[index] = restored }
+        }
+        keepPersonalChat(row.key)
+    }
+
+    public func cleanupPersonalChat(_ key: String, archive: Bool) {
+        updatePersonalChat(key) { if archive { $0.archived = true } else { $0.hidden = true } }
+        guard isChatArchived(key) || isSessionHidden(key) else { return }
+        lastChatCleanupKey = key
+        if SessionKeyMatcher.matches(selectedSessionKey, key) { selectedSessionKey = nil }
+        if sideChat?.sessionKey == key { isSideChatPresented = false }
+    }
+
+    public func dismissChatCleanup() { lastChatCleanupKey = nil }
+
+    public func undoChatCleanup() {
+        guard let key = lastChatCleanupKey else { return }
+        keepPersonalChat(key)
+        if !isChatArchived(key), !isSessionHidden(key) { lastChatCleanupKey = nil }
+    }
+
+    public func movePinnedChat(_ key: String, by offset: Int) {
+        let rows = personalChats.filter { isSessionPinned($0.key) }
+        guard let index = rows.firstIndex(where: { $0.key == key }), rows.indices.contains(index + offset) else { return }
+        var order = rows.map(\.key); order.swapAt(index, index + offset)
+        var preferences = sidebarPreferences
+        for (index, key) in order.enumerated() { preferences.updateChat(key) { $0.rank = Double(index) } }
+        guard saveSidebarPreferences(preferences) else { return }
+        Task { await syncChatSidebar() }
+    }
+
+    public var canCreatePersonalChat: Bool { supportsProjectChats && sidebarPreferencesWritable && !chatSidebarAccountMismatch }
+
+    public func createNamedChat(title: String, firstMessage: String) async throws -> String {
+        guard canCreatePersonalChat else { throw ProjectSidebarError.unavailable }
+        guard !firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProjectSidebarError.invalidName }
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 100 else { throw ProjectSidebarError.invalidName }
+        // No session is created until the user explicitly submits the first message.
+        let key = try await createProjectChat(in: nil)
+        updatePersonalChat(key) { $0.kept = true; $0.title = name; $0.pinned = true; $0.rank = Double(Date().timeIntervalSince1970) }
+        setDraft(firstMessage, forSession: key)
+        if selectedSessionKey != key || !send(firstMessage, attachments: [], deliver: false) {
+            showError("Chat created. Your message is saved as a draft; send it when connected.")
+        }
+        return key
+    }
+
+    public func syncChatSidebar() async {
+        guard sidebarPreferencesWritable else { chatSidebarSyncNotice = "Saved chat organization could not be read. Its original file has been preserved."; return }
+        guard let client, case .connected = connectionState else { return }
+        guard gatewayMethods.isSuperset(of: ["users.self", "users.prefs.get", "users.prefs.set"]) else {
+            chatSidebarSyncNotice = "Chat organization is saved on this device. This gateway does not support sync."
+            return
+        }
+        await syncChatSidebar(request: { try await client.request(method: $0, params: $1) })
+    }
+
+    func syncChatSidebar(request: (String, [String: Any?]) async throws -> Data) async {
+        if chatSidebarSyncRunning { chatSidebarSyncRequested = true; return }
+        chatSidebarSyncRunning = true
+        let generation = clientGeneration, workspace = profile
+        defer {
+            chatSidebarSyncRunning = false
+            if chatSidebarSyncRequested {
+                chatSidebarSyncRequested = false
+                Task { await self.syncChatSidebar() }
+            }
+        }
+        func current() -> Bool { generation == clientGeneration && workspace.id == profile.id && workspace.gatewayURL == profile.gatewayURL && !Task.isCancelled }
+        do {
+            let identityData = try await request("users.self", [:])
+            guard current() else { return }
+            let identity = try JSONSerialization.jsonObject(with: identityData) as? [String: Any]
+            guard let account = (identity?["profile"] as? [String: Any])?["id"] as? String, !account.isEmpty else {
+                throw GatewayTimeoutError(context: "Durable account unavailable")
+            }
+            guard sidebarPreferences.syncAccount == nil || sidebarPreferences.syncAccount == account else {
+                chatSidebarAccountMismatch = true
+                chatSidebarSyncRequested = false
+                chatSidebarSyncNotice = "This workspace is signed into a different account. Reconnect the original account or add a separate workspace; its saved chat list has not been overwritten."
+                return
+            }
+            chatSidebarAccountMismatch = false
+            if sidebarPreferences.syncAccount != account {
+                var bound = sidebarPreferences; bound.syncAccount = account
+                guard saveSidebarPreferences(bound) else { return }
+            }
+            for _ in 0..<3 {
+                chatSidebarSyncRequested = false
+                let data = try await request("users.prefs.get", ["keys": [SidebarPreferences.chatPreferenceKey]])
+                guard current() else { return }
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard response?["status"] as? String == "ok", let entries = response?["entries"] as? [String: Any] else { throw ProjectSidebarError.invalidResponse }
+                let raw = entries[SidebarPreferences.chatPreferenceKey]
+                let remote: [String: ChatSidebarPreference]
+                if let raw {
+                    guard let object = raw as? [String: Any] else { throw ProjectSidebarError.invalidResponse }
+                    remote = try JSONDecoder().decode([String: ChatSidebarPreference].self, from: JSONSerialization.data(withJSONObject: object))
+                    guard remote.allSatisfy({ $0.key.hasPrefix("agent:") && ($0.value.title?.count ?? 0) <= 100 && ($0.value.rank?.isFinite ?? true) }) else { throw ProjectSidebarError.invalidResponse }
+                } else { remote = [:] }
+                let pending = sidebarPreferences.pendingChats ?? [:]
+                let merged = sidebarPreferences.mergedChats(remote)
+                if merged != remote {
+                    let encoded = try JSONEncoder().encode(merged)
+                    guard encoded.count <= 4096 else {
+                        var received = sidebarPreferences
+                        let migrated = received.migratedChats
+                        received.receiveChats(remote, sent: [:]); received.migratedChats = migrated
+                        guard saveSidebarPreferences(received) else { return }
+                        chatSidebarSyncRequested = false
+                        chatSidebarSyncNotice = "Chat sync storage is full. New changes remain on this device; other devices’ changes still download."
+                        return
+                    }
+                    let object = try JSONSerialization.jsonObject(with: encoded)
+                    let resultData = try await request("users.prefs.set", ["entries": [SidebarPreferences.chatPreferenceKey: object],
+                        "expectedEntries": [SidebarPreferences.chatPreferenceKey: raw] as [String: Any?]])
+                    guard current() else { return }
+                    let result = try JSONSerialization.jsonObject(with: resultData) as? [String: Any]
+                    if result?["status"] as? String == "conflict" { continue }
+                    guard result?["status"] as? String == "ok" else { throw ProjectSidebarError.invalidResponse }
+                }
+                let selected = selectedSessionKey
+                let wasRemoved = selected.map { isChatArchived($0) || isSessionHidden($0) } ?? false
+                var preferences = sidebarPreferences; preferences.receiveChats(merged, sent: pending)
+                guard saveSidebarPreferences(preferences) else { return }
+                chatSidebarSyncNotice = nil
+                if let key = selected, key == selectedSessionKey, !wasRemoved, isChatArchived(key) || isSessionHidden(key) { selectedSessionKey = nil }
+                if (preferences.pendingChats ?? [:]).isEmpty && !chatSidebarSyncRequested { return }
+            }
+            chatSidebarSyncNotice = "Chat organization has pending changes. Refresh to retry syncing."
+        } catch {
+            guard current() else { return }
+            chatSidebarSyncNotice = "Chat organization is saved on this device; sync could not finish. Refresh to retry."
+        }
+    }
+
+    // MARK: - Product projects (organizational categories only)
+
+    /// Prefer the event/full-inventory cache over the capped latest-page snapshot.
+    private var projectInventoryRows: [SessionRow] {
+        var rows = Dictionary(self.sessions.map { ($0.key, $0) }, uniquingKeysWith: { _, new in new })
+        for (key, row) in self.operationSessions { rows[key] = row.preservingPresentation(from: rows[key]) }
+        return Array(rows.values)
+    }
+
+    private var projectVisibleRows: [SessionRow] {
+        var rows = Dictionary(self.projectInventoryRows.map { ($0.key, $0) }, uniquingKeysWith: { _, new in new })
+        for saved in self.savedSideChats where rows[saved.sessionKey] == nil {
+            rows[saved.sessionKey] = SessionRow(key: saved.sessionKey, kind: "direct", displayName: saved.title,
+                derivedTitle: nil, lastMessagePreview: nil, channel: nil, updatedAt: nil, unread: nil,
+                pinned: nil, hasActiveRun: nil, model: nil)
+        }
+        let candidates = rows.values.filter { row in
+            guard row.archived != true, !self.isSessionHidden(row.key),
+                  !self.sideChatArchive.isArchived(row.key) else { return false }
+            let kind = SidebarGrouper.category(for: row, mainSessionKey: self.mainSessionKey)
+            return row.isBackground != true && kind != .automation && kind != .task
+        }
+        return ProjectSidebar.stableOrder(Array(candidates), pinned: self.sidebarPreferences.pinnedKeys)
+    }
+
+    public var sidebarProjects: [SidebarProject] {
+        ProjectSidebar.projects(catalog: self.projectCatalogNames, rows: self.projectVisibleRows)
+    }
+
+    public func projectName(for sessionKey: String) -> String? {
+        self.projectInventoryRows.first { SessionKeyMatcher.matches($0.key, sessionKey) }?.category
+    }
+
+    public func projectSessions(for name: String?) -> [SessionRow] {
+        let category = ProjectSidebar.normalizedName(name)
+        return self.projectVisibleRows.filter { $0.category == category }
+    }
+
+    /// Background work stays beneath its owning conversation, not in the project root.
+    public func projectChildSessions(of key: String) -> [SessionRow] {
+        ProjectSidebar.stableOrder(self.projectInventoryRows.filter {
+            guard let parent = $0.spawnedBy else { return false }
+            let kind = SidebarGrouper.category(for: $0, mainSessionKey: self.mainSessionKey)
+            guard $0.isBackground == true || kind == .task || kind == .automation else { return false }
+            return SessionKeyMatcher.matches(parent, key) && $0.archived != true && !self.isSessionHidden($0.key)
+        })
+    }
+
+    /// Background roots/orphans remain reachable even outside the first sidebar page.
+    /// Direct children of visible conversations are already presented beneath their parent.
+    public var projectBackgroundSessions: [SessionRow] {
+        let visibleParents = Set(self.projectVisibleRows.map { SessionKeyMatcher.canonical($0.key) })
+        return ProjectSidebar.stableOrder(self.projectInventoryRows.filter { row in
+            guard row.archived != true, !self.isSessionHidden(row.key) else { return false }
+            let kind = SidebarGrouper.category(for: row, mainSessionKey: self.mainSessionKey)
+            guard row.isBackground == true || kind == .automation || kind == .task else { return false }
+            if let parent = row.spawnedBy, visibleParents.contains(SessionKeyMatcher.canonical(parent)) { return false }
+            return true
+        })
+    }
+
+    public var projectAttentionKeys: Set<String> {
+        Set(self.attentionItems.compactMap(\.sessionKey).map { SessionKeyMatcher.canonical($0) })
+    }
+
+    public func needsProjectAttention(sessionKey: String) -> Bool {
+        self.projectAttentionKeys.contains(SessionKeyMatcher.canonical(sessionKey))
+    }
+
+    public var sidebarFilteredSessions: [SessionRow] {
+        let attentionKeys = self.projectAttentionKeys
+        let rows = ProjectSidebar.filtered(self.projectVisibleRows, by: self.sidebarFilter, attentionKeys: attentionKeys)
+        let query = self.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? rows : rows.filter { SidebarGrouper.matchesSearch($0, query: query, mainSessionKey: self.mainSessionKey) }
+    }
+
+    public func selectProject(_ name: String?) {
+        self.detailNavigationRequest &+= 1
+        self.selectedProjectName = ProjectSidebar.normalizedName(name)
+        self.sidebarFilter = .all
+        self.projectOverviewPresented = true
+        // Deliberately retain selectedSessionKey, its transcript, attachments and draft.
+    }
+
+    public var supportsProjectChats: Bool {
+        guard case .connected = connectionState else { return false }
+        return self.gatewayMethods.isSuperset(of: ["sessions.create", "sessions.patch", "chat.send", "chat.history"])
+    }
+
+    public func refreshProjects() async {
+        guard self.gatewayMethods.contains("sessions.groups.list") else {
+            self.projectSyncNotice = "This gateway does not provide the project catalog. Showing projects from available conversations."
+            return
+        }
+        guard let client, case .connected = self.connectionState else { return }
+        await self.refreshProjects(request: { try await client.request(method: "sessions.groups.list", params: [:]) })
+    }
+
+    func refreshProjects(request: () async throws -> Data) async {
+        let generation = self.clientGeneration
+        let workspaceID = self.profile.id
+        let gatewayURL = self.profile.gatewayURL
+        guard self.projectCatalogRefreshGeneration != generation else { return }
+        self.projectCatalogRefreshGeneration = generation
+        self.lastProjectCatalogRefresh = Date()
+        defer { if self.projectCatalogRefreshGeneration == generation { self.projectCatalogRefreshGeneration = nil } }
+        do {
+            let data = try await request()
+            guard generation == self.clientGeneration, workspaceID == self.profile.id, gatewayURL == self.profile.gatewayURL, !Task.isCancelled else { return }
+            let result = try self.decoder.decode(SidebarProjectCatalog.self, from: data)
+            self.projectCatalogNames = result.groups.sorted {
+                $0.position == $1.position ? $0.name < $1.name : $0.position < $1.position
+            }.map(\.name)
+            self.projectSyncNotice = nil
+        } catch {
+            guard generation == self.clientGeneration, workspaceID == self.profile.id, gatewayURL == self.profile.gatewayURL, !Task.isCancelled else { return }
+            self.projectSyncNotice = "Couldn’t refresh projects. Showing the last available organization."
+        }
+    }
+
+    @discardableResult
+    public func createProjectChat(in project: String?) async throws -> String {
+        guard let client, case .connected = self.connectionState, self.supportsProjectChats else { throw ProjectSidebarError.unavailable }
+        return try await self.createProjectChat(in: project, request: {
+            try await client.request(method: $0, params: $1)
+        })
+    }
+
+    @discardableResult
+    func createProjectChat(in project: String?, request: (String, [String: Any]) async throws -> Data) async throws -> String {
+        guard !self.projectMutationInFlight else { throw ProjectSidebarError.busy }
+        let category = try ProjectSidebar.validatedName(project)
+        let scope = category.map { "category:" + $0 } ?? "general:"
+        if let pending = self.pendingProjectChatKeys[scope], self.projectInventoryRows.contains(where: { $0.key == pending }) {
+            // An uncertain create was subsequently observed. New chat must not adopt it.
+            self.pendingProjectChatKeys[scope] = nil
+        }
+        let key = self.pendingProjectChatKeys[scope] ?? "agent:main:cast-chat-\(UUID().uuidString.lowercased())"
+        self.pendingProjectChatKeys[scope] = key
+        let token = UUID(); self.projectMutationToken = token
+        let generation = self.clientGeneration
+        let workspaceID = self.profile.id
+        let gatewayURL = self.profile.gatewayURL
+        defer { if self.projectMutationToken == token { self.projectMutationToken = nil } }
+        var params: [String: Any] = ["key": key, "idempotencyKey": key, "agentId": "main"]
+        if let category { params["category"] = category }
+        let data = try await request("sessions.create", params)
+        guard generation == self.clientGeneration, workspaceID == self.profile.id, gatewayURL == self.profile.gatewayURL, !Task.isCancelled else { throw ProjectSidebarError.connectionChanged }
+        let created = try self.decoder.decode(ProjectChatCreated.self, from: data)
+        guard created.ok, created.key == key else { throw ProjectSidebarError.invalidResponse }
+        self.pendingProjectChatKeys[scope] = nil
+        self.projectOrganizationRevision &+= 1
+        self.unreadEventRevision &+= 1
+        // The first page may omit an empty session. Keep its confirmed identity immediately.
+        let row = SessionRow(key: key, kind: "direct", displayName: nil, derivedTitle: nil,
+            lastMessagePreview: nil, channel: nil, updatedAt: Date().timeIntervalSince1970 * 1000,
+            unread: false, pinned: false, hasActiveRun: false, model: nil,
+            sessionId: created.sessionId, category: category)
+        if let existing = self.operationSessions[key] {
+            guard created.sessionId == nil || existing.sessionId == nil || created.sessionId == existing.sessionId else { throw ProjectSidebarError.connectionChanged }
+            self.operationSessions[key]?.category = category
+        } else {
+            self.operationSessions[key] = self.sessions.first(where: { $0.key == key }) ?? row
+            self.operationSessions[key]?.category = category
+        }
+        if let index = self.sessions.firstIndex(where: { $0.key == key }) {
+            self.sessions[index].category = category
+        } else {
+            self.sessions.append(self.operationSessions[key] ?? row)
+        }
+        if let category, !self.projectCatalogNames.contains(category) { self.projectCatalogNames.append(category) }
+        self.selectFromSidebar(key)
+        return key
+    }
+
+    public func moveSessionToProject(key: String, project: String?) async throws {
+        guard let client, case .connected = self.connectionState,
+              self.gatewayMethods.contains("sessions.patch") else { throw ProjectSidebarError.unavailable }
+        try await self.moveSessionToProject(key: key, project: project, request: {
+            try await client.request(method: $0, params: $1)
+        })
+    }
+
+    func moveSessionToProject(key: String, project: String?, request: (String, [String: Any]) async throws -> Data) async throws {
+        guard !self.projectMutationInFlight else { throw ProjectSidebarError.busy }
+        let category = try ProjectSidebar.validatedName(project)
+        guard let row = self.projectInventoryRows.first(where: { $0.key == key }),
+              let sessionID = row.sessionId, !sessionID.isEmpty else { throw ProjectSidebarError.missingIdentity }
+        let token = UUID(); self.projectMutationToken = token
+        let generation = self.clientGeneration
+        let workspaceID = self.profile.id
+        let gatewayURL = self.profile.gatewayURL
+        defer { if self.projectMutationToken == token { self.projectMutationToken = nil } }
+        let params: [String: Any] = ["key": key, "expectedSessionId": sessionID, "category": category as Any? ?? NSNull()]
+        let data = try await request("sessions.patch", params)
+        guard generation == self.clientGeneration, workspaceID == self.profile.id, gatewayURL == self.profile.gatewayURL, !Task.isCancelled else { throw ProjectSidebarError.connectionChanged }
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any], result["ok"] as? Bool == true else {
+            throw ProjectSidebarError.invalidResponse
+        }
+        // A replacement observed during the request must not inherit the old move locally.
+        guard let current = self.projectInventoryRows.first(where: { $0.key == key }), current.sessionId == sessionID else { throw ProjectSidebarError.connectionChanged }
+        self.projectOrganizationRevision &+= 1
+        if self.operationSessions[key] == nil { self.operationSessions[key] = current }
+        self.operationSessions[key]?.category = category
+        if let index = self.sessions.firstIndex(where: { $0.key == key }) { self.sessions[index].category = category }
+        if let category, !self.projectCatalogNames.contains(category) { self.projectCatalogNames.append(category) }
+        if SessionKeyMatcher.matches(key, self.selectedSessionKey), !self.projectOverviewPresented { self.selectedProjectName = category }
+        self.unreadEventRevision &+= 1 // Discard an older in-flight full inventory.
     }
 
     public var visibleSessions: [SessionRow] {
         let query = self.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidates = self.sessions.filter { self.showHiddenSessions || !self.isSessionHidden($0.key) }
+        let candidates = self.sessions.filter { !SavedSideChat.isSideChatKey($0.key) && (self.showHiddenSessions || !self.isSessionHidden($0.key)) }
         guard !query.isEmpty else { return candidates }
         return candidates.filter {
             SidebarGrouper.matchesSearch($0, query: query, mainSessionKey: self.mainSessionKey)
@@ -725,7 +1616,7 @@ public final class ChatStore {
             $0.state == .failed ? $0.linkage.sessionKey : nil
         })
         return SidebarGrouper.sections(
-            self.sessions.filter { !self.isSessionHidden($0.key) }.map { session in
+            self.sessions.filter { !SavedSideChat.isSideChatKey($0.key) && !self.isSessionHidden($0.key) }.map { session in
                 let needsAttention = self.unreadCount(for: session.key) > 0
                     || failedNotificationSessionKeys.contains(where: {
                         SessionKeyMatcher.matches($0, session.key)
@@ -763,18 +1654,17 @@ public final class ChatStore {
     public var firstUnreadSessionKey: String? {
         UnreadNavigation.firstSessionKey(
             in: self.sidebarSections,
-            unreadCount: self.unreadCount(for:))
+            unreadCount: self.unreadCount(for:)) ?? self.unreadSummaries.first?.sessionKey
     }
 
     public func unreadCount(in sessions: [SessionRow]) -> Int {
         sessions.reduce(0) { $0 + self.unreadCount(for: $1.key) }
     }
 
-    /// One row per chat carrying unread state, honest about what Cast actually knows: a count
-    /// where real per-message events were observed, otherwise the lower bound the gateway's
-    /// boolean snapshot established. Ordered most-recently-active first.
+    /// One row per unread conversation, including inventory rows outside the sidebar page.
+    /// Ordered most-recently-active first.
     public var unreadSummaries: [ChatUnreadSummary] {
-        let rows = Dictionary(self.sessions.map { (SessionKeyMatcher.canonical($0.key), $0) },
+        let rows = Dictionary((self.sessions + Array(self.operationSessions.values)).map { (SessionKeyMatcher.canonical($0.key), $0) },
                               uniquingKeysWith: { first, _ in first })
         return self.unreadCountsBySession
             .compactMap { sessionKey, count -> ChatUnreadSummary? in
@@ -790,8 +1680,8 @@ public final class ChatStore {
                         SidebarGrouper.displayTitle(for: $0, mainSessionKey: self.mainSessionKey)
                     } ?? sessionKey,
                     preview: SidebarGrouper.cleanPreview(session?.lastMessagePreview),
-                    unreadCount: count,
-                    accuracy: state.accuracy,
+                    unreadCount: min(1, count),
+                    accuracy: .exact,
                     updatedAt: session?.updatedAt ?? state.highestObservedWatermark.map(Double.init))
             }
             .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
@@ -800,9 +1690,10 @@ public final class ChatStore {
     /// Clears local unread state in one transaction and queues authoritative read receipts
     /// without blocking the UI. Failed gateway updates remain retryable after refresh/open.
     public func markAllRead() {
+        self.unreadEventRevision &+= 1
         var watermarks: [String: Int64] = [:]
-        for session in self.sessions {
-            if let watermark = Self.operationWatermark(session.updatedAt) {
+        for session in self.operationSessions.values {
+            if let watermark = Self.sessionReadWatermark(session) {
                 watermarks[session.key] = watermark
             }
         }
@@ -810,7 +1701,7 @@ public final class ChatStore {
         let clearedIDs = self.notificationLedger.markRead(workspaceID: self.profile.id, at: Date())
         self.publishOperationsState()
         self.removeNativeNotifications(identifiers: clearedIDs)
-        for session in self.sessions where session.isUnread {
+        for session in self.operationSessions.values where session.isUnread {
             self.enqueueReadReceipt(session)
         }
     }
@@ -1011,6 +1902,17 @@ public final class ChatStore {
         self.questionInbox = QuestionInbox()
         self.questionError = nil
         if self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL {
+            self.projectOrganizationRevision &+= 1
+            self.projectCatalogNames = []
+            self.selectedProjectName = nil
+            self.projectOverviewPresented = false
+            self.sidebarFilter = .all
+            self.pendingProjectChatKeys = [:]
+            self.projectMutationToken = nil
+            self.projectSyncNotice = nil
+            self.lastProjectCatalogRefresh = nil
+            self.sessions = []
+            self.operationSessions = [:]
             self.sideChat = nil
             for task in sendTasks.values { task.cancel() }
             attachmentDrafts.values.flatMap { $0 }.forEach { $0.removeOwnedFile() }; unselectedAttachments.forEach { $0.removeOwnedFile() }
@@ -1018,7 +1920,18 @@ public final class ChatStore {
             downloads.reset()
             approvals = []; approvalActivity = [:]; approvalRefreshError = nil; approvalRevision &+= 1
         }
+        let sideChatScopeChanged = self.profile.id != profile.id || self.profile.gatewayURL != profile.gatewayURL
         self.profile = profile
+        if sideChatScopeChanged {
+            self.restoreSideChatArchive()
+            self.sidebarPreferencesStore = Self.personalSidebarStore(root: sidebarPreferencesRoot, profile: profile)
+            do { self.sidebarPreferences = try self.sidebarPreferencesStore.load(defaultValue: SidebarPreferences()); self.sidebarPreferencesWritable = true }
+            catch { self.sidebarPreferences = SidebarPreferences(); self.sidebarPreferencesWritable = false }
+            self.chatSidebarAccountMismatch = false
+            self.chatSidebarSyncNotice = nil
+            self.lastChatCleanupKey = nil
+            self.newPersonalChatPresented = false
+        }
         self.restartWithStoredCredential()
     }
 
@@ -1112,7 +2025,7 @@ public final class ChatStore {
         self.gatewayRestartDeadlineMs = nil
         if let chat = self.sideChat { Task { await chat.reconnect() } }
         self.startTranscriptWatchdog()
-        Task { await self.refreshSessions() }
+        Task { await self.refreshSessions(); await self.refreshSideChats(); await self.syncChatSidebar() }
         Task { await self.resubscribeAndReloadOpenSession() }
         self.publishCachedAgentIdentityAndRefresh()
         Task { await self.refreshApprovals() }
@@ -1155,6 +2068,7 @@ public final class ChatStore {
     /// callback. Reassert subscriptions and merge authoritative history whenever either app
     /// becomes active so messages received on another device cannot remain hidden.
     public func refreshAfterActivation() async {
+        self.lastUnreadInventoryAttempt = nil
         self.isSuspendedForBackground = false
         CastLifecycleDiagnostics.gatewayTransition("resume")
         guard self.client != nil else {
@@ -1317,20 +2231,84 @@ public final class ChatStore {
 
     public func refreshSessions() async {
         guard let client = self.client else { return }
-        await refreshSessions { try await client.request(method: "sessions.list", params: [
+        if self.lastProjectCatalogRefresh.map({ Date().timeIntervalSince($0) < 30 }) != true {
+            Task { await self.refreshProjects() }
+        }
+        await refreshSessions(request: { try await client.request(method: "sessions.list", params: [
             "includeGlobal": true, "includeUnknown": false, "limit": 60,
             "includeDerivedTitles": true, "includeLastMessage": true,
-        ]) }
+        ]) }, unreadRequest: { offset in
+            try await client.request(method: "sessions.list", params: [
+                "includeGlobal": true, "includeUnknown": false, "limit": 200, "offset": offset,
+                "includeDerivedTitles": false, "includeLastMessage": false,
+            ])
+        })
+    }
+
+    /// The sidebar/transcript resume must not wait for a potentially large inventory.
+    func refreshSessions(request: () async throws -> Data,
+                         unreadRequest: @escaping (Int) async throws -> Data) async {
+        let generation = self.clientGeneration
+        await self.refreshSessions(request: request)
+        guard generation == self.clientGeneration, self.unreadInventoryTask == nil,
+              self.lastUnreadInventoryAttempt.map({ Date().timeIntervalSince($0) < 60 }) != true
+        else { return }
+        self.unreadInventoryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.unreadInventoryTask = nil }
+            guard generation == self.clientGeneration else { return }
+            await self.refreshUnreadInventory(request: unreadRequest)
+        }
+    }
+
+    /// Reconcile every page, not just the latest 60 sidebar rows. Failed/partial reads
+    /// never erase a backlog. Live changes prevent pruning a moving paginated inventory.
+    func refreshUnreadInventory(request: (Int) async throws -> Data) async {
+        guard !self.unreadInventoryInFlight else { return }
+        self.unreadInventoryInFlight = true
+        self.lastUnreadInventoryAttempt = Date()
+        defer { self.unreadInventoryInFlight = false }
+        let generation = self.clientGeneration
+        let revision = self.unreadEventRevision
+        let deadline = Date().addingTimeInterval(25)
+        var offset = 0
+        var rows: [String: SessionRow] = [:]
+        do {
+            for _ in 0..<64 {
+                let data = try await request(offset)
+                guard generation == self.clientGeneration, !Task.isCancelled else { return }
+                let page = try self.decoder.decode(SessionsListResponse.self, from: data)
+                for row in page.sessions { rows[row.key] = row }
+                if page.hasMore != true {
+                    guard page.hasMore == false, page.truncated != true, page.nextOffset == nil,
+                          page.totalCount.map({ $0 >= 0 && $0 <= rows.count }) ?? true
+                    else { return }
+                    // Do not apply an older assembled inventory over live change events.
+                    guard revision == self.unreadEventRevision else { return }
+                    let previous = Dictionary(self.projectInventoryRows.map { ($0.key, $0) }, uniquingKeysWith: { _, new in new })
+                    rows = rows.mapValues { $0.preservingPresentation(from: previous[$0.key]) }
+                    self.operationSessions = rows
+                    self.unreadLedger.retainSessions(workspaceID: self.profile.id, keys: Set(rows.keys))
+                    self.reconcileOperations(with: Array(rows.values))
+                    return
+                }
+                guard let next = page.nextOffset, next > offset, Date() < deadline else { return }
+                offset = next
+            }
+        } catch {
+            // Keep cached state. The regular refresh/foreground path retries within bounds.
+        }
     }
 
     func refreshSessions(request: () async throws -> Data) async {
         let generation = clientGeneration
+        let organizationRevision = self.projectOrganizationRevision
         guard sessionsRequestGeneration != generation else { return }
         sessionsRequestGeneration = generation
         defer { if sessionsRequestGeneration == generation { sessionsRequestGeneration = nil } }
         do {
             let data = try await request()
-            guard !Task.isCancelled, generation == clientGeneration else { return }
+            guard !Task.isCancelled, generation == clientGeneration, organizationRevision == self.projectOrganizationRevision else { return }
             let list = try self.decoder.decode(SessionsListResponse.self, from: data)
             if let mainKey = list.defaults?.mainSessionKey { self.mainSessionKey = mainKey }
             let refreshed = Self.dedupedByID(
@@ -1338,8 +2316,9 @@ public final class ChatStore {
             // The transcript watchdog polls this on a timer, so republishing an identical
             // list would rebuild the sidebar every cycle for nothing.
             if refreshed != self.sessions { self.sessions = refreshed }
+            self.discoverSideChats(refreshed)
             self.reconcileOperations(with: self.sessions)
-            if let selectedSessionKey = self.selectedSessionKey,
+            if self.isSelectedConversationVisible, let selectedSessionKey = self.selectedSessionKey,
                self.sessions.first(where: { $0.key == selectedSessionKey })?.isUnread == true
             {
                 Task { await self.markSessionRead(selectedSessionKey) }
@@ -1356,11 +2335,6 @@ public final class ChatStore {
                 ? Self.sessionsSubscribeNotice
                 : nil
             self.publishShareDestinations()
-            #if os(macOS)
-            if self.selectedSessionKey == nil {
-                self.selectedSessionKey = self.sidebarSections.flatMap(\.sessions).first?.key
-            }
-            #endif
         } catch {
             guard !Task.isCancelled, generation == clientGeneration else { return }
             // Session discovery is background synchronization. Keep the last
@@ -1553,6 +2527,9 @@ public final class ChatStore {
     }
 
     public func selectFromSidebar(_ key: String?) {
+        if let key, SavedSideChat.isSideChatKey(key) { resumeSideChat(key); return }
+        if key == nil, self.projectOverviewPresented { return }
+        if key != nil { self.detailNavigationRequest &+= 1 }
         #if os(iOS)
         let allowsDeselection = true
         #else
@@ -1567,7 +2544,7 @@ public final class ChatStore {
     }
 
     private func markSessionRead(_ key: String) async {
-        guard let session = self.sessions.first(where: { $0.key == key }) else { return }
+        guard let session = self.operationSessions[key] ?? self.sessions.first(where: { $0.key == key }) else { return }
         self.enqueueReadReceipt(session)
     }
 
@@ -1604,10 +2581,13 @@ public final class ChatStore {
                 try await request()
                 // New replies or a replacement connection must not be cleared by an old ack.
                 guard self.pendingReadReceipts[key] == receipt, self.clientGeneration == generation,
-                      self.readReceiptIsCurrent(key: key, updatedAt: session.updatedAt, watermark: watermark),
-                      let index = self.sessions.firstIndex(where: { $0.key == key })
+                      self.readReceiptIsCurrent(key: key, updatedAt: session.updatedAt, watermark: watermark)
                 else { return }
-                self.sessions[index] = self.sessions[index].settingUnread(false)
+                self.unreadEventRevision &+= 1
+                self.operationSessions[key] = (self.operationSessions[key] ?? session).settingUnread(false)
+                if let index = self.sessions.firstIndex(where: { $0.key == key }) {
+                    self.sessions[index] = self.sessions[index].settingUnread(false)
+                }
             } catch {
                 // Keep the gateway dot; refresh/reopen can retry. Never retry-loop a failed
                 // receipt or hold up the local clear transaction on a disconnected gateway.
@@ -1616,11 +2596,21 @@ public final class ChatStore {
     }
 
     private func readReceiptIsCurrent(key: String, updatedAt: Double?, watermark: Int64?) -> Bool {
-        guard let session = self.sessions.first(where: { $0.key == key }),
+        guard let session = self.operationSessions[key] ?? self.sessions.first(where: { $0.key == key }),
               session.isUnread, session.updatedAt == updatedAt
         else { return false }
         let state = self.unreadLedger.state(workspaceID: self.profile.id, sessionKey: key)
         return (state?.count ?? 0) == 0 && state?.highestObservedWatermark == watermark
+    }
+
+    private func acknowledgeConversationOpen(_ key: String) {
+        self.unreadEventRevision &+= 1
+        let row = self.operationSessions[key] ?? self.sessions.first(where: { $0.key == key })
+        _ = self.unreadLedger.clearOnOpen(workspaceID: self.profile.id, sessionKey: key,
+            throughWatermark: row.flatMap(Self.sessionReadWatermark))
+        self.markNotificationRecordsRead(sessionKey: key)
+        self.publishOperationsState()
+        if row?.isUnread == true { Task { await self.markSessionRead(key) } }
     }
 
     private func beginOpeningSelectedSession(previous: String?) {
@@ -1631,19 +2621,7 @@ public final class ChatStore {
         self.sessionOpenGeneration &+= 1
         let token = SessionOpenToken(generation: self.sessionOpenGeneration, key: self.selectedSessionKey)
 
-        if let key = token.key {
-            let watermark = Self.operationWatermark(
-                self.sessions.first(where: { $0.key == key })?.updatedAt)
-            _ = self.unreadLedger.clearOnOpen(
-                workspaceID: self.profile.id,
-                sessionKey: key,
-                throughWatermark: watermark)
-            self.markNotificationRecordsRead(sessionKey: key)
-            self.publishOperationsState()
-            if self.sessions.first(where: { $0.key == key })?.isUnread == true {
-                Task { await self.markSessionRead(key) }
-            }
-        }
+        if let key = token.key { self.acknowledgeConversationOpen(key) }
 
         self.cancelScheduledHistoryRetry(resetAttempt: true)
         self.historySyncState = token.key == nil ? .idle : .loading
@@ -2618,10 +3596,10 @@ public final class ChatStore {
             AttentionItem(id: "question:" + entry.id, kind: .question, sessionKey: entry.request.sessionKey,
                 title: "Question waiting", detail: entry.request.questions.first?.question ?? "Answer requested", referenceID: entry.id)
         }
-        return questions + AttentionReducer.items(sessions: self.sessions, approvals: self.approvals,
+        return questions + AttentionReducer.items(sessions: self.projectInventoryRows.filter { $0.archived != true }, approvals: self.approvals,
             notifications: self.notificationRecords, deliverables: self.deliverableLedger.items,
             reviewed: self.reviewedWork.ids, hidden: self.sidebarPreferences.hiddenKeys,
-            acknowledgedFailures: Set(self.sessions.filter { self.isFailureAcknowledged($0) }.map(\.key)), now: date)
+            acknowledgedFailures: Set(self.projectInventoryRows.filter { self.isFailureAcknowledged($0) }.map(\.key)), now: date)
     }
 
     public func markDeliverableReviewed(_ id: String) {
@@ -2737,12 +3715,13 @@ public final class ChatStore {
 
     public func setSessionHidden(_ hidden: Bool, sessionKey: String) {
         var preferences = self.sidebarPreferences
-        preferences.setHidden(hidden, key: sessionKey)
+        preferences.updateChat(sessionKey) { $0.hidden = hidden }
         guard self.saveSidebarPreferences(preferences) else { return }
+        Task { await self.syncChatSidebar() }
         if hidden {
             self.lastHiddenSessionKey = sessionKey
             if SessionKeyMatcher.matches(self.selectedSessionKey, sessionKey) {
-                self.selectedSessionKey = self.sidebarSections.flatMap(\.sessions).first?.key
+                self.selectedSessionKey = nil
             }
         } else if SessionKeyMatcher.matches(self.lastHiddenSessionKey, sessionKey) {
             self.lastHiddenSessionKey = nil
@@ -2750,9 +3729,8 @@ public final class ChatStore {
     }
 
     public func toggleSessionPinned(_ key: String) {
-        var preferences = self.sidebarPreferences
-        preferences.setPinned(!preferences.isPinned(key), key: key)
-        _ = self.saveSidebarPreferences(preferences)
+        let pinned = !isSessionPinned(key)
+        updatePersonalChat(key) { $0.kept = true; $0.pinned = pinned; if pinned { $0.rank = Double(Date().timeIntervalSince1970) } }
     }
 
     public func undoHideSession() {
@@ -2763,6 +3741,8 @@ public final class ChatStore {
     public func dismissHideUndo() { self.lastHiddenSessionKey = nil }
 
     private func saveSidebarPreferences(_ preferences: SidebarPreferences) -> Bool {
+        guard sidebarPreferencesWritable else { showError("Saved chat organization could not be read. The original file is preserved; no changes were written."); return false }
+        guard preferences != sidebarPreferences else { return true }
         // These tiny, user-initiated writes complete before publishing so a disk error
         // cannot silently lose the preference, and rapid hide/undo cannot reorder writes.
         do {
@@ -2969,6 +3949,12 @@ public final class ChatStore {
     // MARK: - Events
 
     func handleEvent(_ event: EventFrame) {
+        if let key = event.payload?["sessionKey"]?.stringValue,
+           event.event == "session.message" || (event.event == "chat" && ["delta", "final"].contains(event.payload?["state"]?.stringValue ?? "")) {
+            // A message is activity even when its side-chat pane is not currently instantiated.
+            self.noteSideChatActivity(key)
+        }
+        if ["session.message", "sessions.changed"].contains(event.event) { self.unreadEventRevision &+= 1 }
         self.sideChat?.receive(event)
         switch event.event {
         case "cast.hello":
@@ -2981,7 +3967,34 @@ public final class ChatStore {
             self.handleAgentEvent(event)
         case "session.message":
             self.handleSessionMessage(event)
+        case "users.prefs.changed":
+            if event.payload?["keys"]?.arrayValue?.contains(where: { $0.stringValue == SidebarPreferences.chatPreferenceKey }) == true {
+                Task { await self.syncChatSidebar() }
+            }
+            if event.payload?["keys"]?.arrayValue?.contains(where: { $0.stringValue == SideChatArchive.preferenceKey }) == true {
+                Task { await self.syncSideChatArchives() }
+            }
         case "sessions.changed":
+            if event.payload?["reason"]?.stringValue == "groups" {
+                self.lastProjectCatalogRefresh = nil
+                Task { await self.refreshProjects() }
+            }
+            if let value = event.payload?["session"],
+               let data = try? self.encoder.encode(value),
+               let row = try? self.decoder.decode(SessionRow.self, from: data) {
+                if row.unread != nil {
+                    let previous = self.projectInventoryRows.first { $0.key == row.key }
+                    if value["category"] != nil, row.category != previous?.category { self.projectOrganizationRevision &+= 1 }
+                    self.reconcileOperations(with: [row.preservingPresentation(from: previous)])
+                } else if value["category"] != nil,
+                          let current = self.projectInventoryRows.first(where: { $0.key == row.key }),
+                          let incarnation = row.sessionId, incarnation == current.sessionId {
+                    if self.operationSessions[row.key] == nil { self.operationSessions[row.key] = current }
+                    self.operationSessions[row.key]?.category = row.category
+                    if let index = self.sessions.firstIndex(where: { $0.key == row.key }) { self.sessions[index].category = row.category }
+                    self.projectOrganizationRevision &+= 1
+                }
+            }
             self.scheduleSessionsRefresh(changedSessionKey: event.payload?["sessionKey"]?.stringValue)
         case "question.requested":
             if let request = self.decodePayload(event, as: QuestionRequest.self) {
@@ -3173,8 +4186,11 @@ public final class ChatStore {
         let message = messageValue["id"]?.stringValue?.isEmpty == false
             ? decoded
             : decoded.identifiedByContent()
-        if !message.isUser,
-           !(self.isNotificationContextVisible && SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey))
+        if message.role == "assistant",
+           !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.mediaPaths.isEmpty || !message.managedAttachments.isEmpty || message.blocks.contains(where: { $0.normalizedType == "image" }),
+           !["NO_REPLY", "HEARTBEAT_OK"].contains(message.text.trimmingCharacters(in: .whitespacesAndNewlines)),
+           !(message.responseProvider == "openclaw" && ["delivery-mirror", "gateway-injected"].contains(message.responseModel ?? "")),
+           !(self.isSelectedConversationVisible && SessionKeyMatcher.matches(eventSessionKey, self.selectedSessionKey))
         {
             self.recordUnreadReply(
                 sessionKey: eventSessionKey,
@@ -3513,10 +4529,16 @@ public final class ChatStore {
             .appendingPathComponent(String(component), isDirectory: true)
     }
 
+    nonisolated static func sessionReadWatermark(_ session: SessionRow) -> Int64? {
+        [session.updatedAt, session.lastReadAt].compactMap { operationWatermark($0) }.max()
+    }
+
     private func reconcileOperations(with sessions: [SessionRow]) {
         for session in sessions {
-            let watermark = Self.operationWatermark(session.updatedAt)
-            if self.isNotificationContextVisible && SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
+            self.operationSessions[session.key] = session
+            guard session.unread != nil else { continue }
+            let watermark = Self.sessionReadWatermark(session)
+            if self.isSelectedConversationVisible && SessionKeyMatcher.matches(session.key, self.selectedSessionKey) {
                 _ = self.unreadLedger.clearOnOpen(
                     workspaceID: self.profile.id,
                     sessionKey: session.key,
@@ -3551,6 +4573,9 @@ public final class ChatStore {
                     sessionKey: session.key,
                     isUnread: false,
                     watermark: watermark)
+                if self.unreadLedger.state(workspaceID: self.profile.id, sessionKey: session.key)?.count == 0 {
+                    self.markNotificationRecordsRead(sessionKey: session.key)
+                }
             }
         }
         self.publishOperationsState()
@@ -3629,7 +4654,7 @@ public final class ChatStore {
         // tests can observe the "muted" suppression reason.
         let muted = self.muteLedger.isMuted(sessionKey: sessionKey)
         let hidden = self.isSessionHidden(sessionKey)
-        let visible = self.isNotificationContextVisible
+        let visible = self.isSelectedConversationVisible
             && SessionKeyMatcher.matches(sessionKey, self.selectedSessionKey)
         #if os(iOS)
         let enabled = self.remotePushEnabled
@@ -3712,9 +4737,9 @@ public final class ChatStore {
     private func publishOperationsState() {
         self.numericUnreadCount = (self.unreadLedger.workspaces[self.profile.id]?.sessions ?? [:])
             .filter { !self.isSessionHidden($0.key) }
-            .values.reduce(0) { $0 + $1.count }
+            .values.reduce(0) { $0 + ($1.count > 0 ? 1 : 0) }
         self.unreadCountsBySession =
-            self.unreadLedger.workspaces[self.profile.id]?.sessions.mapValues(\.count) ?? [:]
+            self.unreadLedger.workspaces[self.profile.id]?.sessions.mapValues { min(1, $0.count) } ?? [:]
         self.notificationRecords = self.notificationLedger.records.filter {
             $0.linkage.workspaceID == self.profile.id
         }
@@ -3794,7 +4819,7 @@ public final class ChatStore {
         guard self.notificationLedger.observe(dedupeID: dedupeID,
             linkage: NotificationLinkage(workspaceID: self.profile.id, sessionKey: destination.sessionKey, sourceEventID: eventID),
             at: now) == .inserted else { return false }
-        let visible = self.isNotificationContextVisible && SessionKeyMatcher.matches(destination.sessionKey, self.selectedSessionKey)
+        let visible = self.isSelectedConversationVisible && SessionKeyMatcher.matches(destination.sessionKey, self.selectedSessionKey)
         let suppressed = presenting && (!self.remotePushEnabled || self.isSessionMuted(destination.sessionKey)
             || self.isSessionHidden(destination.sessionKey) || visible)
         if suppressed {

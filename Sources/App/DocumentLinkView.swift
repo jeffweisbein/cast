@@ -26,6 +26,8 @@ struct DocumentLinkView: View {
     }
     @State private var previewURL: URL?
     @State private var attachments = false
+    @State private var exporting = false
+    @State private var exportResultMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -39,17 +41,13 @@ struct DocumentLinkView: View {
                 }
                 if let error { Text(error).foregroundStyle(.secondary).textSelection(.enabled) }
                 if let localURL {
-                    Text("Saved on this device.").foregroundStyle(.secondary)
-                    HStack {
-                        Button("Preview") { previewURL = localURL }
-                        #if os(macOS)
-                        Button("Open") { NSWorkspace.shared.open(localURL) }
-                        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([localURL]) }
-                        #endif
-                        ShareLink(item: localURL)
+                    Text("Downloaded inside Cast. Save a copy to choose a folder on this device.").foregroundStyle(.secondary)
+                    ViewThatFits(in: .horizontal) {
+                        HStack { fileActions(localURL) }
+                        VStack(alignment: .leading) { fileActions(localURL) }
                     }
                 } else if !loading {
-                    Button("Retry download") { download() }
+                    if entry?.canRetry != false { Button("Retry download") { download() } }
                     Button("View conversation attachments") { attachments = true }
                 }
                 Spacer(minLength: 0)
@@ -65,7 +63,18 @@ struct DocumentLinkView: View {
             if !Task.isCancelled, entry == nil { download() }
         }
         .quickLookPreview($previewURL)
+        .modifier(DownloadExportPresenter(url: localURL, exporting: $exporting, resultMessage: $exportResultMessage))
         .sheet(isPresented: $attachments) { DeliverablesView(store: store, sessionKey: link.sessionKey) }
+    }
+
+    @ViewBuilder private func fileActions(_ localURL: URL) -> some View {
+        Button("Preview") { previewURL = localURL }
+        #if os(macOS)
+        Button("Open") { NSWorkspace.shared.open(localURL) }
+        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([localURL]) }
+        #endif
+        DownloadSaveButton(exporting: $exporting, resultMessage: $exportResultMessage)
+        ShareLink(item: localURL)
     }
 
     private func download() { store.startDownload(item) }
