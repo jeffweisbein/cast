@@ -32,6 +32,26 @@ enum TranscriptLayoutStrategy: String, CaseIterable {
     var usesWindowedTranscript: Bool { true }
 }
 
+/// When an eager transcript may spend main-thread time growing its window.
+@MainActor
+enum TranscriptGrowthPacing {
+    static let idleSecondsBeforeGrowth: Double = 0.5
+    static let stepIntervalMilliseconds = 60
+    static let busyPollMilliseconds = 150
+
+    /// Seconds since the reader last used the keyboard, mouse or trackpad. Replaceable so
+    /// tests neither depend on nor are disturbed by whoever is using the machine.
+    static var secondsSinceUserInput: () -> Double = {
+        #if os(macOS)
+        // `~0` is the documented "any input event" selector for this query.
+        guard let anyInput = CGEventType(rawValue: ~0) else { return .infinity }
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+        #else
+        return .infinity
+        #endif
+    }
+}
+
 struct ChatView: View {
     let store: ChatStore
     @Environment(\.scenePhase) private var scenePhase
@@ -50,7 +70,14 @@ struct ChatView: View {
     @State private var nearBottom = true
     @State private var atBottom = true
     @State private var followState = TranscriptFollowState()
-    @State private var transcriptWindow = TranscriptWindow()
+    /// Eager transcripts (macOS) open on a small first-paint window and grow it in steps;
+    /// see `stagedWindowGrowth`. Lazy transcripts keep the full window from the start.
+    @State private var transcriptWindow: TranscriptWindow
+    /// The conversation `transcriptWindow` was last reset for. `onChange` runs only after
+    /// the body has already been evaluated for a new selection, and a cached conversation
+    /// publishes its rows in that same update — so the stored window alone would build the
+    /// previous chat's full-size window for the new chat before being reset.
+    @State private var transcriptWindowSessionKey: String?
     @State private var readingWindowStartID: String?
     @State private var readingWindowEndID: String?
     @State private var focusedSearchItemID: String?
@@ -86,14 +113,33 @@ struct ChatView: View {
         self.allowsSending = allowsSending
         self.showsComposer = showsComposer
         self._showingSideChat = showingSideChat
+        self._transcriptWindow = State(initialValue: layoutStrategy.usesLazyTranscript
+            ? TranscriptWindow()
+            : TranscriptWindow.stagedForEagerRendering())
     }
 
     private var items: [TranscriptItem] {
         self.store.transcriptItems(showAgentWork: self.showAgentWork)
     }
 
+    /// The window for the conversation on screen right now. Until `onChange` has caught up
+    /// with a new selection this is a first-paint window, never the previous chat's.
+    private var currentTranscriptWindow: TranscriptWindow {
+        guard self.transcriptWindowSessionKey != self.store.selectedSessionKey else {
+            return self.transcriptWindow
+        }
+        var fresh = self.transcriptWindow
+        fresh.resetForFirstPaint()
+        return fresh
+    }
+
+    private func restartTranscriptWindow() {
+        self.transcriptWindow.resetForFirstPaint()
+        self.transcriptWindowSessionKey = self.store.selectedSessionKey
+    }
+
     private var windowSelection: TranscriptWindowSelection {
-        self.transcriptWindow.selection(
+        self.currentTranscriptWindow.selection(
             totalItemCount: self.items.count,
             anchoredStartIndex: self.readingWindowStartID.flatMap { id in
                 self.items.firstIndex { $0.id == id }
@@ -366,8 +412,63 @@ struct ChatView: View {
                    active: store.isAgentTurnActive)
     }
 
+    /// Everything that decides whether the first-paint window may keep growing. The task
+    /// below is keyed on it, so selecting another conversation, scrolling away from the
+    /// tail or starting a search cancels the growth in flight instead of racing it.
+    private struct WindowGrowthTrigger: Equatable {
+        let sessionKey: String?
+        let needsGrowth: Bool
+        let followsLatest: Bool
+        let isSearching: Bool
+        let hasItems: Bool
+    }
+
+    private var windowGrowthTrigger: WindowGrowthTrigger {
+        WindowGrowthTrigger(
+            sessionKey: self.store.selectedSessionKey,
+            needsGrowth: self.currentTranscriptWindow.needsStagedGrowth,
+            followsLatest: self.followState.followsLatest,
+            isSearching: self.focusedSearchItemID != nil,
+            // A cold open publishes an empty transcript first. Growing against it would
+            // spend the staging before the rows that need it arrive.
+            hasItems: !self.items.isEmpty)
+    }
+
+    /// Restores the normal window after the first paint, a bounded slice of rows at a time.
+    /// Each slice is real main-thread work, so it is spent only while the reader is not
+    /// touching the Mac: rapid switching never pays for it, and a reader who starts typing
+    /// or scrolling waits for at most the slice already in flight. Runs only while the
+    /// reader follows the tail: the bottom scroll anchor absorbs rows added above the
+    /// viewport, so growth is invisible. Scrolling up pins the window as before and offers
+    /// Show Earlier.
+    private func stagedWindowGrowth(_ trigger: WindowGrowthTrigger) async {
+        guard trigger.needsGrowth, trigger.followsLatest, !trigger.isSearching, trigger.hasItems
+        else { return }
+        while !Task.isCancelled {
+            let idle = TranscriptGrowthPacing.secondsSinceUserInput()
+                >= TranscriptGrowthPacing.idleSecondsBeforeGrowth
+            try? await Task.sleep(for: .milliseconds(idle
+                ? TranscriptGrowthPacing.stepIntervalMilliseconds
+                : TranscriptGrowthPacing.busyPollMilliseconds))
+            guard !Task.isCancelled,
+                  self.store.selectedSessionKey == trigger.sessionKey,
+                  self.transcriptWindowSessionKey == trigger.sessionKey,
+                  self.followState.followsLatest,
+                  self.focusedSearchItemID == nil
+            else { return }
+            // Re-read after the sleep: input that arrived meanwhile postpones the slice.
+            guard TranscriptGrowthPacing.secondsSinceUserInput()
+                >= TranscriptGrowthPacing.idleSecondsBeforeGrowth
+            else { continue }
+            guard self.transcriptWindow.growTowardInitialWindow() else { return }
+        }
+    }
+
     private var liveTranscriptBody: some View {
         self.transcriptScrollBody
+        .task(id: self.windowGrowthTrigger) {
+            await self.stagedWindowGrowth(self.windowGrowthTrigger)
+        }
         .task(id: self.tailUpdate) {
             let sessionKey = self.store.selectedSessionKey
             guard self.followState.followsLatest, self.focusedSearchItemID == nil else { return }
@@ -475,13 +576,13 @@ struct ChatView: View {
             self.followState.resume()
             self.followAnchorID = nil
             self.reanchorAttempts = 0
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             self.scrollToBottom(animated: false)
         }
         .onChange(of: self.showAgentWork) {
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             if self.followState.followsLatest {
@@ -496,7 +597,7 @@ struct ChatView: View {
             self.followState.resume()
             self.followAnchorID = nil
             self.reanchorAttempts = 0
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             self.lastTailID = self.store.messages.last?.id

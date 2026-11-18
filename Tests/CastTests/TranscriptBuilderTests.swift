@@ -763,6 +763,67 @@ final class TranscriptWindowTests: XCTestCase {
         XCTAssertEqual(window.selection(totalItemCount: 8).range, 5..<8)
     }
 
+    func testDefaultWindowOpensAtFullSizeSoLazyTranscriptsAreUnchanged() {
+        var window = TranscriptWindow()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        XCTAssertFalse(window.needsStagedGrowth)
+        window.resetForFirstPaint()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        XCTAssertFalse(window.growTowardInitialWindow())
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+    }
+
+    func testEagerWindowPaintsTheTailFirstThenGrowsInBoundedSteps() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.eagerFirstPaintItemCount)
+        XCTAssertEqual(
+            window.selection(totalItemCount: 1_000).range,
+            (1_000 - TranscriptWindow.eagerFirstPaintItemCount)..<1_000,
+            "The first paint is the newest rows")
+        var sizes = [window.requestedItemCount]
+        while window.growTowardInitialWindow() { sizes.append(window.requestedItemCount) }
+        sizes.append(window.requestedItemCount)
+        XCTAssertEqual(sizes.last, TranscriptWindow.defaultInitialItemCount)
+        for (smaller, larger) in zip(sizes, sizes.dropFirst()) {
+            XCTAssertGreaterThan(larger, smaller)
+            XCTAssertLessThanOrEqual(larger - smaller, TranscriptWindow.eagerStagedGrowthItemCount)
+        }
+        XCTAssertFalse(window.needsStagedGrowth)
+        XCTAssertFalse(window.growTowardInitialWindow(), "Growth stops at the normal window")
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+    }
+
+    func testResetNeverJumpsAStagedWindowToFullSize() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        window.growTowardInitialWindow()
+        let partial = window.requestedItemCount
+        window.reset()
+        XCTAssertEqual(window.requestedItemCount, partial, "Resuming the tail must not build 200 rows at once")
+        XCTAssertTrue(window.needsStagedGrowth)
+
+        while window.growTowardInitialWindow() {}
+        window.showEarlier(totalItemCount: 1_000)
+        XCTAssertEqual(window.requestedItemCount, 400)
+        XCTAssertFalse(window.growTowardInitialWindow(), "Growth never shrinks or extends a reader's expansion")
+        XCTAssertEqual(window.requestedItemCount, 400)
+        window.reset()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        window.resetForFirstPaint()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.eagerFirstPaintItemCount)
+    }
+
+    func testShowEarlierDuringStagedGrowthExpandsFromTheRowsOnScreen() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        let first = window.selection(totalItemCount: 1_000)
+        window.showEarlier(totalItemCount: 1_000, anchoredStartIndex: first.range.lowerBound)
+        XCTAssertFalse(window.needsStagedGrowth)
+        let expanded = window.selection(totalItemCount: 1_000)
+        XCTAssertEqual(expanded.range.upperBound, 1_000)
+        XCTAssertEqual(
+            expanded.visibleItemCount,
+            TranscriptWindow.eagerFirstPaintItemCount + TranscriptWindow.defaultExpansionItemCount)
+    }
+
     func testCountsAreSanitizedAndSelectionHandlesEmptyInput() {
         let window = TranscriptWindow(initialItemCount: 0, expansionItemCount: -5)
         let empty = window.selection(totalItemCount: -10)

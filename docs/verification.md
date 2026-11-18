@@ -58,3 +58,29 @@ rewrite, and eviction of render/media metadata. The warm-open fixture has 1,000 
 its elapsed measurement includes the test's settling poll and compares app-model behavior,
 not physical click-to-paint latency. Native macOS/iOS builds and installed-device acceptance
 remain separate evidence. PQG intake 400 / occurrence 402 tracks the original report.
+
+### macOS render stall on switch
+
+The warm model path above did not change what the reader saw. The installed build's
+always-on main-thread watchdog recorded 1.5–2.2 s stalls on nearly every switch, with no
+`ChatStore` work inside the stall, and an external sample placed the time in
+`NSHostingView.layout`. macOS renders the transcript as an eager stack, so each switch
+instantiated and laid out the whole 200-row window, cached or not.
+
+`ChatSwitchRenderLatencyTests` hosts the production `ChatView` in a window and rotates
+through seven synthetic 1,500-message conversations (more than the five-entry snapshot
+cache, so warm and evicted opens are both covered), then flips between two warm chats. It
+measures main-thread unavailability after each programmatic selection with the same
+technique as the watchdog. The eager transcript now opens on a 16-row tail window and grows
+back to the normal 200 rows in bounded steps, only while the reader follows the tail and is
+not using the keyboard or pointer; another selection, scrolling away or a search cancels
+growth. The window is keyed to the selected conversation so a cached chat never inherits
+the previous chat's full-size window for its first frame. iOS keeps its lazy transcript and
+full initial window.
+
+Regressions cover first-frame-before-full-window for warm and evicted opens, growth back to
+the normal window with the newest row still in view, growth waiting for reader input,
+selection during growth, and the window arithmetic (`TranscriptWindowTests`). These are
+hosted-view timings of a Debug build with synthetic content: not a physical click, not a
+display refresh, and not installed-device acceptance. PQG intake 405 / occurrence 407
+tracks this report.
