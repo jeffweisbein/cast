@@ -132,3 +132,131 @@ final class TranscriptCacheWriteTests: XCTestCase {
         print("CACHE_WRITE_STRESS repeats=100 media_bytes_per_snapshot=2097152 replaced_file_count=\(replacements) elapsed_seconds=\(Date().timeIntervalSince(start))")
     }
 }
+
+/// Exercises real selection and cache hydration without a live gateway or user data.
+@MainActor
+final class ChatSwitchPerformanceTests: XCTestCase {
+    private let a = "agent:main:switch-a"
+    private let b = "agent:main:switch-b"
+
+    private func fixture() async -> (ChatStore, TranscriptCache) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CastSwitch-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let cache = TranscriptCache(workspaceID: "switch-tests", root: root)
+        let rows = (0..<1_000).map { index in
+            ChatMessage(id: "row-\(index)", role: index.isMultiple(of: 2) ? "user" : "assistant",
+                blocks: [ChatContentBlock(type: "text", text: "Synthetic transcript row \(index)",
+                    thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: Double(index * 1_000))
+        }
+        await cache.save(rows, sessionKey: a)
+        await cache.save(Array(rows.suffix(20)), sessionKey: b)
+        let store = ChatStore(profile: .init(id: "switch-tests", name: "Test",
+            gatewayURL: URL(string: "wss://example.invalid")!, accent: "blue"),
+            transcriptCacheRoot: root, operationsLedgerRoot: root.appendingPathComponent("operations"))
+        return (store, cache)
+    }
+
+    private func settle(_ store: ChatStore) async throws {
+        for _ in 0..<500 {
+            if store.historySyncState == .idle { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Offline session open did not settle")
+    }
+
+    func testWarmSwitchReusesPreparedRowsWithoutDiskRepublish() async throws {
+        let (store, _) = await fixture()
+        store.selectedSessionKey = a
+        try await settle(store)
+        let expected = store.transcriptItems(showAgentWork: true)
+        XCTAssertEqual(store.messages.count, 1_000)
+        store.selectedSessionKey = b
+        try await settle(store)
+        _ = store.transcriptItems(showAgentWork: true)
+        let start = ContinuousClock.now
+        store.selectedSessionKey = a
+        let revision = store.transcriptRevision
+        // The ready-to-render snapshot must survive selection, before any async work runs.
+        XCTAssertEqual(store.transcriptBuilderConsumedMessageCount, 1_000)
+        XCTAssertEqual(store.transcriptItems(showAgentWork: true), expected)
+        try await settle(store)
+        XCTAssertEqual(store.transcriptRevision, revision, "Warm text-only opens must not republish disk history")
+        print("CHAT_SWITCH warm_1000_rows_elapsed=\(start.duration(to: .now)) extra_publications=\(store.transcriptRevision - revision)")
+    }
+
+    func testRapidSwitchNeverAppliesOtherChatsDiskHistory() async throws {
+        let (store, _) = await fixture()
+        store.selectedSessionKey = a
+        store.selectedSessionKey = b
+        store.selectedSessionKey = a
+        try await settle(store)
+        XCTAssertEqual(store.selectedSessionKey, a)
+        XCTAssertEqual(store.messages.count, 1_000)
+    }
+
+    func testWarmImageTranscriptStillRehydratesLocalMedia() async throws {
+        let (store, cache) = await fixture()
+        let image = ChatMessage(id: "photo", role: "user", blocks: [], timestamp: 1,
+            localImageData: [Data([1, 2, 3])])
+        await cache.save([image], sessionKey: a)
+        store.selectedSessionKey = a
+        try await settle(store)
+        XCTAssertEqual(store.messages.first?.localImageData, image.localImageData)
+        _ = store.transcriptItems(showAgentWork: true)
+        store.selectedSessionKey = b
+        try await settle(store)
+        store.selectedSessionKey = a
+        XCTAssertEqual(store.messages.first?.localImageData, [])
+        try await settle(store)
+        XCTAssertEqual(store.messages.first?.localImageData, image.localImageData)
+    }
+    func testWarmSwitchRespectsDisplayModeAndInvalidatedRows() async throws {
+        let (store, _) = await fixture()
+        store.selectedSessionKey = a
+        try await settle(store)
+        let hidden = store.transcriptItems(showAgentWork: false)
+        store.selectedSessionKey = b
+        try await settle(store)
+        store.selectedSessionKey = a
+        XCTAssertEqual(store.transcriptItems(showAgentWork: false), hidden)
+        XCTAssertNil(store.transcriptBuilderConsumedMessageCount)
+        let expanded = store.transcriptItems(showAgentWork: true)
+        XCTAssertFalse(expanded.isEmpty)
+        XCTAssertEqual(store.transcriptBuilderConsumedMessageCount, 1_000)
+        try await settle(store)
+        var edited = store.messages
+        edited[0] = ChatMessage(id: "edited", role: "user", blocks: [
+            ChatContentBlock(type: "text", text: "Updated after preparing the display",
+                thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: 0)
+        store.installOfflineDiagnosticTranscript(edited)
+        store.selectedSessionKey = b
+        try await settle(store)
+        store.selectedSessionKey = a
+        XCTAssertNil(store.transcriptBuilderConsumedMessageCount, "Never reuse stale prepared rows")
+        XCTAssertEqual(store.messages.first?.id, "edited")
+        XCTAssertNotEqual(store.transcriptItems(showAgentWork: true), expanded)
+        try await settle(store)
+        XCTAssertEqual(store.messages.first?.id, "edited", "Disk must not overwrite newer memory")
+    }
+
+    func testSnapshotEvictionDropsRenderStateAndPreservesPendingMediaHydration() {
+        var snapshots = TranscriptSnapshotStore(capacity: 2)
+        let photo = ChatMessage(id: "photo", role: "user", blocks: [], timestamp: 1,
+            localImageData: [Data([1, 2, 3])])
+        let render = TranscriptRenderSnapshot(items: TranscriptBuilder.items(from: [photo], showAgentWork: true),
+            showsAgentWork: true, builder: nil)
+        snapshots.store([photo], for: a, render: render)
+        XCTAssertNil(snapshots.renderSnapshot(for: a), "Do not retain image bytes via display groups")
+        XCTAssertTrue(snapshots.needsMediaHydration(for: a))
+        let stripped = snapshots.snapshot(for: a)!
+        snapshots.store(stripped, for: a)
+        XCTAssertTrue(snapshots.needsMediaHydration(for: a), "Rapid switches must not forget stripped images")
+        snapshots.store([], for: b, render: .init(items: [], showsAgentWork: false, builder: nil))
+        snapshots.store([], for: "third")
+        XCTAssertNil(snapshots.snapshot(for: a))
+        XCTAssertFalse(snapshots.needsMediaHydration(for: a))
+        snapshots.store([], for: "fourth")
+        XCTAssertNil(snapshots.renderSnapshot(for: b))
+    }
+
+}
