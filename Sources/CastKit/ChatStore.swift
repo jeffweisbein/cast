@@ -230,16 +230,28 @@ enum HistoryBackfillError: Error {
     case invalidNextOffset
 }
 
-/// Bounded most-recently-used cache of in-memory transcripts for instant session
-/// switching. Unbounded, an afternoon of hopping across the fleet retained every
-/// transcript ever opened for the process lifetime; a handful of sessions covers flipping
-/// between active chats, and the disk cache remains the durable fallback for the rest.
+/// Value-type render state travels with the bounded MRU snapshot. Image-bearing
+/// transcripts deliberately do not retain it: groups/builders also reference messages.
+struct TranscriptRenderSnapshot: Sendable {
+    let items: [TranscriptItem]
+    let showsAgentWork: Bool
+    let builder: IncrementalTranscriptBuilder?
+}
+
+/// Bounded most-recently-used cache of in-memory transcripts and prepared display rows.
+/// A handful of sessions covers flipping between active chats; disk remains the durable
+/// fallback. Eviction releases messages, render state and media-hydration metadata together.
 struct TranscriptSnapshotStore: Sendable {
     static let defaultCapacity = 5
 
     private let capacity: Int
     private var recencyOrder: [String] = []
-    private var snapshotsByKey: [String: [ChatMessage]] = [:]
+    private struct Entry: Sendable {
+        let messages: [ChatMessage]
+        let render: TranscriptRenderSnapshot?
+        let needsMediaHydration: Bool
+    }
+    private var snapshotsByKey: [String: Entry] = [:]
 
     init(capacity: Int = Self.defaultCapacity) {
         self.capacity = max(1, capacity)
@@ -248,13 +260,20 @@ struct TranscriptSnapshotStore: Sendable {
     /// Optimistic image bytes are stripped on the way in: the disk cache already persists
     /// them in side files and rehydrates on open, so keeping them here only let a few
     /// pasted screenshots dominate the working set.
-    mutating func store(_ messages: [ChatMessage], for key: String) {
-        self.snapshotsByKey[key] = messages.map { message in
+    mutating func store(_ messages: [ChatMessage], for key: String,
+                        render: TranscriptRenderSnapshot? = nil) {
+        // A rapid switch can save the stripped snapshot before hydration finishes.
+        // Retain its media requirement until eviction rather than losing those images.
+        let needsMedia = self.snapshotsByKey[key]?.needsMediaHydration == true
+            || messages.contains { !$0.localImageData.isEmpty }
+        let storedMessages = needsMedia ? messages.map { message in
             guard !message.localImageData.isEmpty else { return message }
             var stripped = message
             stripped.localImageData = []
             return stripped
-        }
+        } : messages
+        self.snapshotsByKey[key] = Entry(messages: storedMessages,
+            render: needsMedia ? nil : render, needsMediaHydration: needsMedia)
         self.touch(key)
         while self.recencyOrder.count > self.capacity, let oldest = self.recencyOrder.first {
             self.recencyOrder.removeFirst()
@@ -263,9 +282,17 @@ struct TranscriptSnapshotStore: Sendable {
     }
 
     mutating func snapshot(for key: String) -> [ChatMessage]? {
-        guard let messages = self.snapshotsByKey[key] else { return nil }
+        guard let entry = self.snapshotsByKey[key] else { return nil }
         self.touch(key)
-        return messages
+        return entry.messages
+    }
+
+    func renderSnapshot(for key: String) -> TranscriptRenderSnapshot? {
+        self.snapshotsByKey[key]?.render
+    }
+
+    func needsMediaHydration(for key: String) -> Bool {
+        self.snapshotsByKey[key]?.needsMediaHydration == true
     }
 
     private mutating func touch(_ key: String) {
@@ -2626,9 +2653,22 @@ public final class ChatStore {
         self.cancelScheduledHistoryRetry(resetAttempt: true)
         self.historySyncState = token.key == nil ? .idle : .loading
         if let previous, !self.messages.isEmpty {
-            self.transcriptSnapshots.store(self.messages, for: previous)
+            let render = self.transcriptCacheShowsAgentWork.flatMap { mode in
+                self.transcriptCacheIsStale ? nil : TranscriptRenderSnapshot(
+                    items: self.transcriptCache, showsAgentWork: mode, builder: self.transcriptBuilder)
+            }
+            self.transcriptSnapshots.store(self.messages, for: previous, render: render)
         }
-        self.messages = token.key.flatMap { self.transcriptSnapshots.snapshot(for: $0) } ?? []
+        let snapshot = token.key.flatMap { self.transcriptSnapshots.snapshot(for: $0) }
+        let needsDiskSnapshot = snapshot == nil
+            || token.key.map { self.transcriptSnapshots.needsMediaHydration(for: $0) } == true
+        self.messages = snapshot ?? []
+        if let render = token.key.flatMap({ self.transcriptSnapshots.renderSnapshot(for: $0) }) {
+            self.transcriptCache = render.items
+            self.transcriptCacheShowsAgentWork = render.showsAgentWork
+            self.transcriptBuilder = render.builder
+            self.transcriptCacheIsStale = false
+        }
         self.streamingText = ""
         self.streamingReasoningText = ""
         self.activeToolName = nil
@@ -2645,11 +2685,11 @@ public final class ChatStore {
         guard token.key != nil else { return }
         if let key = token.key { self.scheduleProgressCardFetch(for: key) }
         self.sessionOpenTask = Task { [weak self] in
-            await self?.openSelectedSession(token: token, previous: previous)
+            await self?.openSelectedSession(token: token, previous: previous, needsDiskSnapshot: needsDiskSnapshot)
         }
     }
 
-    private func openSelectedSession(token: SessionOpenToken, previous: String?) async {
+    private func openSelectedSession(token: SessionOpenToken, previous: String?, needsDiskSnapshot: Bool) async {
         guard let key = token.key else { return }
         let performanceInterval = CastPerformanceDiagnostics.begin(
             .openSelectedSession,
@@ -2659,6 +2699,8 @@ public final class ChatStore {
                 performanceInterval,
                 metadata: "messages=\(self.messages.count) state=\(String(describing: self.historySyncState))")
         }
+        // Keep cleanup ordered ahead of the next subscription, including rapid A/B/A
+        // switches. Cached rows were already restored synchronously by the selection setter.
         if let previous, let client = self.client {
             self.subscribedSessionKeys.remove(previous)
             _ = try? await client.request(method: "sessions.messages.unsubscribe", params: ["key": previous])
@@ -2675,27 +2717,32 @@ public final class ChatStore {
         // Connected opens can replace an oversized legacy blob with the 200-row live tail.
         // Offline, the cache is the only transcript available, so retain the old (slower)
         // decode instead of presenting a long saved conversation as empty.
-        let cachedSnapshot = await self.cache.loadSnapshot(
-            sessionKey: key,
-            allowOversizedLegacyFile: self.client == nil)
-        let cached = cachedSnapshot.messages
-        guard !Task.isCancelled,
-              Self.shouldApplySessionOpen(
-                  token,
-                  generation: self.sessionOpenGeneration,
-                  selectedKey: self.selectedSessionKey)
-        else { return }
-        if !cached.isEmpty {
-            self.messages = Self.reconciledHistory(
-                cached,
-                current: self.messages,
-                pendingEchoes: &self.pendingEchoes)
-        }
-        if !hadCompleteInMemorySnapshot {
-            if cachedSnapshot.isComplete {
-                self.completeHistorySessionKeys.insert(key)
-            } else {
-                self.completeHistorySessionKeys.remove(key)
+        // A warm text snapshot is already newer than its disk copy. Re-decoding and
+        // reconciling it republishes the same rows and discards the prepared render state.
+        // Image snapshots still take the disk path to recover their stripped local bytes.
+        if needsDiskSnapshot {
+            let cachedSnapshot = await self.cache.loadSnapshot(
+                sessionKey: key,
+                allowOversizedLegacyFile: self.client == nil)
+            let cached = cachedSnapshot.messages
+            guard !Task.isCancelled,
+                  Self.shouldApplySessionOpen(
+                      token,
+                      generation: self.sessionOpenGeneration,
+                      selectedKey: self.selectedSessionKey)
+            else { return }
+            if !cached.isEmpty {
+                self.messages = Self.reconciledHistory(
+                    cached,
+                    current: self.messages,
+                    pendingEchoes: &self.pendingEchoes)
+            }
+            if !hadCompleteInMemorySnapshot {
+                if cachedSnapshot.isComplete {
+                    self.completeHistorySessionKeys.insert(key)
+                } else {
+                    self.completeHistorySessionKeys.remove(key)
+                }
             }
         }
         guard self.client != nil else {

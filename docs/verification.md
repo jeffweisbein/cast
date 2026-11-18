@@ -43,3 +43,18 @@ Full receipts: operator task evidence directory `cast-guard-replays-20261101`. N
 The iOS **Photos & Videos** picker imports movies through a file representation, not an image preview. Files and the Photos share extension use the same preparation path. Videos at or below 16 MiB retain their original bytes; larger clips are exported to MP4 at 720p, then 480p if necessary, without modifying the source. The final per-file and aggregate frame limits still apply. A clip that cannot fit asks the user to trim it. Cancelled imports and imports whose workspace/conversation changed do not enter the current draft.
 
 `VideoAttachmentTests` uses a synthetic one-second MP4 with audio to verify byte-preserving RPC payloads, a playable bounded export with audio, source preservation, corrupt media rejection and cancellation. The large-input test pads the valid movie beyond the transport limit; it exercises export and limits, not real-world long-video quality. Physical Photos/iCloud selection and end-to-end agent interpretation remain separate acceptance checks.
+
+## Chat switching
+
+`ChatSwitchPerformanceTests` exercises the production `ChatStore` selection path with
+synthetic offline transcripts. Warm text-only opens reuse the existing five-session MRU's
+prepared display rows and do not reload/reconcile the older disk snapshot. Live gateway
+refreshes and subscription ordering are unchanged. Media-bearing snapshots still strip
+image bytes and rehydrate from disk; render state is not retained for those snapshots.
+
+The tests cover immediate prepared-row reuse, zero redundant disk publication, rapid
+A/B/A selection, local image recovery, display-mode changes, invalidation after a transcript
+rewrite, and eviction of render/media metadata. The warm-open fixture has 1,000 messages;
+its elapsed measurement includes the test's settling poll and compares app-model behavior,
+not physical click-to-paint latency. Native macOS/iOS builds and installed-device acceptance
+remain separate evidence. PQG intake 400 / occurrence 402 tracks the original report.
