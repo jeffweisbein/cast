@@ -65,6 +65,7 @@ struct ChatView: View {
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
+    @State private var showingResultReview = false
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
@@ -276,6 +277,11 @@ struct ChatView: View {
                     }
                 }
         }
+        // Its own view: deliverable/progress observation stays out of this body. Placed
+        // before approvals and questions so anything that needs the user stays nearest the
+        // composer.
+        ChatResultCard(store: self.store) { self.showingResultReview = true }
+            .id("result-card")
         if self.showAgentWork {
             ForEach(self.store.approvals) { approval in
                 ApprovalCardView(approval: approval, store: self.store)
@@ -734,6 +740,22 @@ struct ChatView: View {
                 }
                 .help("Media and links from this chat")
             }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    self.showingResultReview.toggle()
+                } label: {
+                    Label("Result", systemImage: "sidebar.trailing")
+                }
+                .help(self.showingResultReview ? "Hide result review" : "Review this chat's result, progress and details")
+                .accessibilityIdentifier("result-review-toggle")
+            }
+        }
+        .inspector(isPresented: self.$showingResultReview) {
+            ResultReviewInspector(store: self.store, isPresented: self.$showingResultReview)
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+                #if os(iOS)
+                .presentationDetents([.medium, .large])
+                #endif
         }
         .sheet(isPresented: self.$showingLibrary) {
             LibraryView(store: self.store)

@@ -23,6 +23,7 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     @State private var renaming: SessionRow?
     @State private var renameText = ""
     @State private var query = ""
+    @State private var workFilter: ChatWorkFilter = .all
 
     private var selection: Binding<String?> {
         Binding(get: { store.isSideChatPresented ? store.sideChat?.sessionKey : store.selectedSessionKey },
@@ -30,6 +31,15 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     }
     private var rows: [SessionRow] {
         store.personalChats.filter { query.isEmpty || store.chatTitle($0).localizedCaseInsensitiveContains(query) }
+    }
+    /// One pass per sidebar evaluation; rows read the dictionary and never touch transcripts.
+    private func workStates(for rows: [SessionRow]) -> [String: ChatWorkState] {
+        store.chatWorkStates(for: rows)
+    }
+    private func filterCounts(_ states: [String: ChatWorkState]) -> [ChatWorkFilter: Int] {
+        var counts: [ChatWorkFilter: Int] = [:]
+        for state in states.values { counts[state.filter, default: 0] += 1 }
+        return counts
     }
     var body: some View {
         @Bindable var store = store
@@ -99,6 +109,10 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
                 if compact { newChatButton }
             }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 12).padding(.bottom, 8)
+            let counts = filterCounts(workStates(for: store.personalChats))
+            if !compact, workFilter != .all || counts.values.contains(where: { $0 > 0 }) {
+                ChatFilterBar(filter: $workFilter, counts: counts).padding(.bottom, 6)
+            }
         }
     }
 
@@ -112,22 +126,32 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     }
 
     @ViewBuilder private func chatRows(compact: Bool) -> some View {
-        let rows = self.rows
+        let searched = self.rows
+        let states = workStates(for: searched)
+        // Filtering keeps the pinned-first, user-chosen order; it never re-sorts by state.
+        let rows = ChatWorkStateReducer.filter(searched, by: compact ? .all : workFilter, states: states)
         let pinned = rows.filter { store.isSessionPinned($0.key) }
         let other = rows.filter { !store.isSessionPinned($0.key) }
         if compact {
-            ForEach(pinned + other) { chatRow($0) }
+            ForEach(pinned + other) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) }
         } else {
             if !pinned.isEmpty {
-                Section("Pinned") { ForEach(pinned) { chatRow($0) } }
+                Section("Pinned") { ForEach(pinned) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) } }
             }
             if !other.isEmpty {
-                Section(pinned.isEmpty ? "Your chats" : "Other chats") { ForEach(other) { chatRow($0) } }
+                Section(pinned.isEmpty ? "Your chats" : "Other chats") { ForEach(other) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) } }
             }
         }
         if rows.isEmpty {
-            Text(query.isEmpty ? "Create a chat or choose an existing one in Manage Chats." : "No matching chats.")
-                .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            if !searched.isEmpty, workFilter != .all {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No chats are \(workFilter.title.lowercased()) right now.").font(.callout).foregroundStyle(.secondary)
+                    Button("Show all chats") { workFilter = .all }.buttonStyle(.borderless)
+                }.padding(.vertical, 8)
+            } else {
+                Text(query.isEmpty ? "Create a chat or choose an existing one in Manage Chats." : "No matching chats.")
+                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            }
         }
     }
 
@@ -160,17 +184,15 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
         }
     }
 
-    private func chatRow(_ row: SessionRow) -> some View {
+    private func chatRow(_ row: SessionRow, state: ChatWorkState?) -> some View {
         HStack(spacing: 4) {
             Button { store.selectFromSidebar(row.key) } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "bubble.left").foregroundStyle(.secondary).frame(width: 18)
-                    Text(store.chatTitle(row)).lineLimit(1).truncationMode(.tail)
-                        .foregroundStyle(.primary).frame(maxWidth: .infinity, alignment: .leading)
-                    if store.unreadCount(for: row.key) > 0 || row.isUnread {
-                        Circle().fill(.blue).frame(width: 6, height: 6).accessibilityLabel("Unread")
-                    }
-                }.padding(.vertical, 9).contentShape(Rectangle())
+                PersonalChatRowLabel(
+                    title: store.chatTitle(row),
+                    preview: SidebarGrouper.cleanPreview(row.lastMessagePreview),
+                    updated: row.updatedDate,
+                    unread: store.unreadCount(for: row.key) > 0 || row.isUnread,
+                    state: state)
             }.buttonStyle(.plain).accessibilityIdentifier("personal-chat-" + row.key)
             Menu { actions(row) } label: {
                 Image(systemName: "ellipsis").foregroundColor(colorScheme == .dark ? Color.white.opacity(0.8) : Color.black.opacity(0.6)).frame(width: 44, height: 44).contentShape(Rectangle())
