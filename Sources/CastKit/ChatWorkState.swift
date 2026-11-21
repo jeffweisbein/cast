@@ -37,7 +37,8 @@ public enum ChatWorkState: Equatable, Sendable {
         case .needsYou(.failure): return "Run failed"
         case .needsYou(.stopped): return "Last run stopped"
         case .needsYou(.checkReply): return "Check the last reply"
-        case .needsYou(.delivery): return "Reply not delivered"
+        // The reply exists in Cast; only the push notification failed.
+        case .needsYou(.delivery): return "Notification not delivered"
         case .working: return "Working"
         case .workingLastKnown: return "Working · last known"
         case .readyToReview: return "Ready to review"
@@ -133,7 +134,7 @@ public enum ChatWorkStateReducer {
             let key = SessionKeyMatcher.canonical(row.key)
             if let reason = hardAttention[key] {
                 result[key] = .needsYou(reason)
-            } else if ProjectSidebar.isWorking(row) || key == live {
+            } else if Self.isRunning(row) || key == live {
                 result[key] = connected ? .working : .workingLastKnown
             } else if let kind = softAttention[key] {
                 result[key] = .needsYou(kind == .delivery ? .delivery : Self.failureReason(for: row))
@@ -142,6 +143,11 @@ public enum ChatWorkStateReducer {
             }
         }
         return result
+    }
+
+    /// A live run only. `queued` means waiting to start, so it is not called working.
+    static func isRunning(_ row: SessionRow) -> Bool {
+        row.hasActiveRun == true || row.status?.lowercased() == "running"
     }
 
     /// Splits the flattened failure attention back into what the gateway actually said.
@@ -173,6 +179,7 @@ public struct ChatResultSummary: Equatable, Sendable {
     public let sessionKey: String
     public let items: [Deliverable]
     public let unreviewedCount: Int
+    public let unreviewedIDs: Set<String>
     public let latest: Deliverable?
     public let progress: Evidence
     public let progressUpdatedAt: Date?
@@ -184,6 +191,15 @@ public struct ChatResultSummary: Equatable, Sendable {
     /// Every known artifact carries this device's local review mark. The ledger is partial,
     /// so this is never a claim that nothing exists to review.
     public var nothingLeftMarkedHere: Bool { !self.items.isEmpty && self.unreviewedCount == 0 }
+
+    /// The in-chat card belongs to the turn that produced it: shown only while the newest
+    /// unreviewed artifact was shared in or after the latest loaded assistant message.
+    /// Unknown share time or no loaded assistant message means no card (the toolbar remains).
+    public func showsInChatCard(latestAssistantTimestamp: Double?) -> Bool {
+        guard self.unreviewedCount > 0, let latest = self.latest, let shared = latest.sharedAt,
+              let assistant = latestAssistantTimestamp else { return false }
+        return shared >= assistant
+    }
 
     public init(sessionKey: String, ledger: [Deliverable], reviewed: Set<String>, progressCard: ProgressCard?,
                 limit: Int = 200) {
@@ -199,7 +215,8 @@ public struct ChatResultSummary: Equatable, Sendable {
             if items.count >= max(limit, 1) { break }
         }
         self.items = items
-        self.unreviewedCount = self.items.filter { !reviewed.contains($0.reviewID) }.count
+        self.unreviewedIDs = Set(self.items.map(\.reviewID).filter { !reviewed.contains($0) })
+        self.unreviewedCount = self.unreviewedIDs.count
         self.latest = self.items.first { !reviewed.contains($0.reviewID) } ?? self.items.first
         if let card = progressCard, SessionKeyMatcher.matches(card.sessionKey, sessionKey) || card.sessionKey.isEmpty,
            card.totalStepCount > 0 {

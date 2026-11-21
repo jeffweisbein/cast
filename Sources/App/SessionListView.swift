@@ -24,6 +24,9 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     @State private var renameText = ""
     @State private var query = ""
     @State private var workFilter: ChatWorkFilter = .all
+    /// Re-evaluates time-bound states (question/approval/agent-note expiry) without a
+    /// per-row timer; the sidebar is reduced once per tick.
+    @State private var stateClock = Date()
 
     private var selection: Binding<String?> {
         Binding(get: { store.isSideChatPresented ? store.sideChat?.sessionKey : store.selectedSessionKey },
@@ -42,7 +45,7 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     }
     /// One pass per sidebar evaluation; rows read the dictionary and never touch transcripts.
     private func workStates(for rows: [SessionRow]) -> [String: ChatWorkState] {
-        store.chatWorkStates(for: rows)
+        store.chatWorkStates(for: rows, at: max(stateClock, Date()))
     }
     private func filterCounts(_ states: [String: ChatWorkState]) -> [ChatWorkFilter: Int] {
         var counts: [ChatWorkFilter: Int] = [:]
@@ -52,6 +55,12 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     var body: some View {
         @Bindable var store = store
         sidebar
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                stateClock = Date()
+            }
+        }
         .task(id: store.lastChatCleanupKey) {
             guard store.lastChatCleanupKey != nil else { return }
             do { try await Task.sleep(for: .seconds(8)) } catch { return }
@@ -119,7 +128,9 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
                 if compact { newChatButton }
             }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 12).padding(.bottom, 8)
-            let counts = filterCounts(states)
+            // Counts follow the search text so a chip never promises rows the list hides.
+            let searchedKeys = Set(rows.map { SessionKeyMatcher.canonical($0.key) })
+            let counts = filterCounts(states.filter { searchedKeys.contains($0.key) })
             if !compact, workFilter != .all || counts.values.contains(where: { $0 > 0 }) {
                 ChatFilterBar(filter: $workFilter, counts: counts).padding(.bottom, 6)
             }
@@ -232,8 +243,11 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     @ViewBuilder private func actions(_ row: SessionRow) -> some View {
         Button(store.isSessionPinned(row.key) ? "Unpin" : "Pin", systemImage: "pin") { store.toggleSessionPinned(row.key) }
         if store.isSessionPinned(row.key) {
+            // Moves act on the full pinned order; a filtered list would hide the neighbour.
             Button("Move up", systemImage: "arrow.up") { store.movePinnedChat(row.key, by: -1) }
+                .disabled(workFilter != .all)
             Button("Move down", systemImage: "arrow.down") { store.movePinnedChat(row.key, by: 1) }
+                .disabled(workFilter != .all)
         }
         Button("Rename", systemImage: "pencil") { renameText = store.chatTitle(row); renaming = row }
         Button(store.isSessionMuted(row.key) ? "Unmute" : "Mute", systemImage: "bell.slash") { store.setSessionMuted(!store.isSessionMuted(row.key), sessionKey: row.key) }

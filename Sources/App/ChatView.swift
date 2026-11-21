@@ -743,7 +743,7 @@ struct ChatView: View {
                 Button {
                     self.store.presentResultReview(!self.store.isResultReviewPresented)
                 } label: {
-                    Label("Result", systemImage: "sidebar.trailing")
+                    Label("Result", systemImage: "doc.text.magnifyingglass")
                 }
                 .help(self.store.isResultReviewPresented ? "Hide result review" : "Review this chat's files, progress and details")
                 .accessibilityIdentifier("result-review-toggle")

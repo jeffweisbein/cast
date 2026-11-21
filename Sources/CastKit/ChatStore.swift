@@ -3686,6 +3686,16 @@ public final class ChatStore {
             now: date)
     }
 
+    /// One save and one observation change for a batch, instead of one per item.
+    public func markDeliverablesReviewed(_ ids: [String]) {
+        var ledger = self.reviewedWork
+        let before = ledger.ids.count
+        ledger.ids.formUnion(ids)
+        guard ledger.ids.count != before else { return }
+        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger; self.refreshResultArtifactCounts() }
+        catch { self.showError("Couldn’t save review status. Please try again.") }
+    }
+
     public func markDeliverableReviewed(_ id: String) {
         var ledger = self.reviewedWork
         ledger.ids.insert(id)
@@ -3722,6 +3732,7 @@ public final class ChatStore {
         let artifacts = try decoder.decode(Response.self, from: data).artifacts
         var ledger = deliverableLedger
         ledger.ingest(artifacts: artifacts, sessionKey: sessionKey)
+        guard ledger != deliverableLedger else { return }
         try deliverableStore.save(ledger)
         deliverableLedger = ledger
         refreshResultArtifactCounts()

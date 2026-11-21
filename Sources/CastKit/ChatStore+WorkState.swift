@@ -41,6 +41,11 @@ extension ChatStore {
                           reviewed: self.reviewedWork.ids, progressCard: self.progressCard(for: sessionKey))
     }
 
+    /// Timestamp (ms) of the newest loaded assistant message in the selected chat.
+    public var latestAssistantTimestamp: Double? {
+        self.messages.last(where: { $0.role == "assistant" })?.timestamp
+    }
+
     public func sessionRow(for sessionKey: String?) -> SessionRow? {
         guard let sessionKey else { return nil }
         return self.sessions.first { SessionKeyMatcher.matches($0.key, sessionKey) }

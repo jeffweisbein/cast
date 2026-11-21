@@ -37,12 +37,44 @@ final class ChatWorkStateTests: XCTestCase {
         XCTAssertTrue(self.states([row("agent:main:a")]).isEmpty, "A quiet chat must not be given an invented state")
     }
 
-    func testActiveRunAndQueuedStatusAreWorking() {
+    func testOnlyLiveRunsAreWorking() {
         let states = self.states([row("agent:main:a", active: true), row("agent:main:b", status: "queued"),
-                                  row("agent:main:c", status: "done")])
+                                  row("agent:main:c", status: "done"), row("agent:main:d", status: "running")])
         XCTAssertEqual(states["agent:main:a"], .working)
-        XCTAssertEqual(states["agent:main:b"], .working)
+        XCTAssertNil(states["agent:main:b"], "Queued is waiting to start, not working")
         XCTAssertNil(states["agent:main:c"])
+        XCTAssertEqual(states["agent:main:d"], .working)
+    }
+
+    func testDeliveryFailureDoesNotClaimTheReplyIsMissing() {
+        let states = self.states([row("agent:main:a")], attention: [attention(.delivery, "agent:main:a")])
+        XCTAssertEqual(states["agent:main:a"], .needsYou(.delivery))
+        XCTAssertEqual(ChatWorkState.needsYou(.delivery).label, "Notification not delivered")
+    }
+
+    func testInChatCardBelongsToTheLatestTurnAndEndsWhenReviewed() {
+        let shared = artifact("agent:main:a", "1")  // sharedAt 1_784_600_000_000
+        let unreviewed = ChatResultSummary(sessionKey: "agent:main:a", ledger: [shared], reviewed: [], progressCard: nil)
+        XCTAssertTrue(unreviewed.showsInChatCard(latestAssistantTimestamp: 1_784_600_000_000), "Shared by the latest reply")
+        XCTAssertFalse(unreviewed.showsInChatCard(latestAssistantTimestamp: 1_784_600_060_000),
+                       "A newer reply moves the card out of the transcript; the toolbar stays")
+        XCTAssertFalse(unreviewed.showsInChatCard(latestAssistantTimestamp: nil), "No loaded turn, no card")
+        let reviewed = ChatResultSummary(sessionKey: "agent:main:a", ledger: [shared], reviewed: [shared.reviewID],
+                                         progressCard: nil)
+        XCTAssertFalse(reviewed.showsInChatCard(latestAssistantTimestamp: 1_784_600_000_000), "Reviewed: no permanent card")
+        let undated = Deliverable(id: "u", sessionKey: "agent:main:a", messageID: "m", title: "t", target: "artifact:u",
+                              kind: "Attachment", sharedAt: nil, artifactID: "u")
+        XCTAssertFalse(ChatResultSummary(sessionKey: "agent:main:a", ledger: [undated], reviewed: [], progressCard: nil)
+            .showsInChatCard(latestAssistantTimestamp: 1), "Unknown share time is not attributed to a turn")
+    }
+
+    func testRunStatusWordsDoNotInventIdle() {
+        XCTAssertEqual(ResultRunFacts.statusWord(nil), "Not reported")
+        XCTAssertEqual(ResultRunFacts.statusWord("killed"), "Stopped")
+        XCTAssertEqual(ResultRunFacts.statusWord("weird"), "Reported as “weird”")
+        let facts = ResultRunFacts(row: row("agent:main:a", status: "done"), agentName: nil, isLiveTurn: false)
+        XCTAssertTrue(facts.facts.contains { $0.label.hasPrefix("Est. cost") } == false)
+        XCTAssertEqual(facts.facts.first { $0.label == "Run" }?.value, "Finished")
     }
 
     func testDisconnectedWorkingIsLastKnownButStillFilteredAsWorking() {
@@ -170,7 +202,7 @@ final class ChatWorkStateTests: XCTestCase {
         XCTAssertFalse(facts.facts.contains { $0.label == "Machine" || $0.label == "Agent" })
         XCTAssertTrue(facts.notReported.contains("machine"))
         XCTAssertTrue(facts.notReported.contains("model"), "No session model reported means unknown, not a default")
-        XCTAssertEqual(facts.facts.first { $0.label == "Run" }?.value, "Idle")
+        XCTAssertEqual(facts.facts.first { $0.label == "Run" }?.value, "Not reported")
         let live = ResultRunFacts(row: row("agent:main:a"), agentName: "Cast", isLiveTurn: true)
         XCTAssertEqual(live.facts.first { $0.label == "Run" }?.value, "Active now")
         XCTAssertEqual(live.facts.first { $0.label == "Agent" }?.value, "Cast")
@@ -242,6 +274,14 @@ final class ChatWorkStoreTests: XCTestCase {
         XCTAssertNil(store.resultArtifactCounts(for: "agent:main:other"))
         store.markDeliverableReviewed(items[0].reviewID)
         XCTAssertEqual(store.resultArtifactCounts(for: "agent:main:x"), ResultArtifactCounts(total: 1, unreviewed: 0))
+        let more = (2..<6).map {
+            Deliverable(id: "b\($0)", sessionKey: "agent:main:y", messageID: "m", title: "b", target: "artifact:b\($0)",
+                        kind: "Attachment", sharedAt: 1, artifactID: "b\($0)")
+        }
+        store.installDeliverablesForTesting(items + more)
+        store.markDeliverablesReviewed(Array(more.prefix(2)).map(\.reviewID))
+        XCTAssertEqual(store.resultArtifactCounts(for: "agent:main:y"), ResultArtifactCounts(total: 4, unreviewed: 2),
+                       "Batch marking marks exactly the given items")
         XCTAssertFalse(store.isGatewayConnected)
         XCTAssertNil(store.chatWorkState(for: "agent:main:x"), "Reviewed artifacts and unconnected idle chat: no state")
     }

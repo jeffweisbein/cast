@@ -185,9 +185,11 @@ struct ChatResultCard: View {
 
     var body: some View {
         // Cached counts first: chats without gateway artifacts never scan the ledger.
-        if let key = self.store.selectedSessionKey, (self.store.resultArtifactCounts(for: key)?.total ?? 0) > 0 {
+        if let key = self.store.selectedSessionKey, (self.store.resultArtifactCounts(for: key)?.unreviewed ?? 0) > 0 {
             let summary = self.store.resultSummary(for: key)
-            if !summary.isEmpty {
+            // Only for the turn that shared it, and only until reviewed; afterwards the
+            // toolbar's Result button is the way in.
+            if summary.showsInChatCard(latestAssistantTimestamp: self.store.latestAssistantTimestamp) {
                 ChatResultCardContent(
                     summary: summary,
                     state: self.store.chatWorkState(for: key),
@@ -342,6 +344,7 @@ struct ResultReviewInspector: View {
     @State private var tab: ResultReviewTab = .files
     @State private var previewURL: URL?
     @State private var showingAllDeliverables = false
+    @State private var refreshFailed = false
 
     var body: some View {
         #if os(iOS)
@@ -370,15 +373,21 @@ struct ResultReviewInspector: View {
                                           isLiveTurn: self.store.isAgentTurnActive),
                     tab: self.$tab,
                     artifact: { item in self.artifactRow(item) },
-                    markAllReviewed: {
-                        for item in summary.items where !self.store.reviewedWork.ids.contains(item.reviewID) {
-                            self.store.markDeliverableReviewed(item.reviewID)
-                        }
-                    },
+                    markAllReviewed: { ids in self.store.markDeliverablesReviewed(ids) },
                     showAll: { self.showingAllDeliverables = true })
                     .task(id: key) {
                         // Bounded refresh of this chat only; existing ledger stays visible offline.
-                        try? await self.store.refreshArtifacts(sessionKey: key)
+                        self.refreshFailed = false
+                        do { try await self.store.refreshArtifacts(sessionKey: key) }
+                        catch is CancellationError {}
+                        catch { self.refreshFailed = true }
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        if self.refreshFailed {
+                            Text("Couldn’t refresh files from the gateway. Showing what this device already knows.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .padding(8).frame(maxWidth: .infinity).background(.bar)
+                        }
                     }
             } else {
                 ContentUnavailableView("No chat selected", systemImage: "bubble.left")
@@ -443,7 +452,7 @@ struct ResultRunFacts: Equatable {
         }
         if let row {
             let active = ProjectSidebar.isWorking(row) || isLiveTurn
-            facts.append(Fact(label: "Run", value: active ? "Active now" : (row.status?.capitalized ?? "Idle")))
+            facts.append(Fact(label: "Run", value: active ? "Active now" : Self.statusWord(row.status)))
         }
         if let fill = row?.contextFillFraction {
             facts.append(Fact(label: "Context", value: "\(Int((fill * 100).rounded()))% full"))
@@ -452,7 +461,7 @@ struct ResultRunFacts: Equatable {
             facts.append(Fact(label: "Tokens", value: "\(Self.compact(input)) in · \(Self.compact(output)) out"))
         }
         if let cost = row?.estimatedCostUsd {
-            facts.append(Fact(label: "Est. cost", value: cost.formatted(.currency(code: "USD"))))
+            facts.append(Fact(label: "Est. cost (not an invoice)", value: cost.formatted(.currency(code: "USD"))))
         }
         if let updated = row?.updatedDate {
             facts.append(Fact(label: "Updated", value: updated.formatted(.relative(presentation: .named))))
@@ -460,6 +469,18 @@ struct ResultRunFacts: Equatable {
         missing.append(contentsOf: ["machine", "per-step model", "build and test results", "installation"])
         self.facts = facts
         self.notReported = missing
+    }
+
+    static func statusWord(_ status: String?) -> String {
+        switch status?.lowercased() {
+        case nil, "": return "Not reported"
+        case "done": return "Finished"
+        case "failed": return "Failed"
+        case "killed": return "Stopped"
+        case "timeout": return "Timed out"
+        case "queued": return "Queued"
+        case let other?: return "Reported as “\(other)”"
+        }
     }
 
     private static func compact(_ value: Double) -> String {
@@ -477,7 +498,8 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
     let facts: ResultRunFacts
     @Binding var tab: ResultReviewTab
     @ViewBuilder let artifact: (Deliverable) -> ArtifactRow
-    var markAllReviewed: () -> Void = {}
+    /// Receives exactly the unreviewed items currently shown.
+    var markAllReviewed: ([String]) -> Void = { _ in }
     var showAll: () -> Void = {}
     /// Fixtures render the full height; the app scrolls.
     var scrolls = true
@@ -512,6 +534,11 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
             .padding(16)
     }
 
+    private var shownUnreviewedIDs: [String] {
+        self.summary.items.prefix(Self.visibleArtifactLimit).map(\.reviewID)
+            .filter { id in self.summary.unreviewedIDs.contains(id) }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("RESULT")
@@ -544,8 +571,10 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
                 Button("All files and links", action: self.showAll).buttonStyle(.borderless)
                     .accessibilityIdentifier("result-show-all")
                 Spacer()
-                if self.summary.unreviewedCount > 1 {
-                    Button("Mark all as reviewed", action: self.markAllReviewed).buttonStyle(.bordered)
+                let shownUnreviewed = self.shownUnreviewedIDs
+                if shownUnreviewed.count > 1 {
+                    Button("Mark \(shownUnreviewed.count) as reviewed") { self.markAllReviewed(shownUnreviewed) }
+                        .buttonStyle(.bordered)
                         .accessibilityIdentifier("result-mark-all-reviewed")
                 }
             }
@@ -702,7 +731,7 @@ enum ResultArtifactAvailability: Equatable {
     case web(URL)
     case cached(URL)
     case downloading(received: Int, total: Int?)
-    case failed(String)
+    case failed(String, canRetry: Bool, canDownload: Bool)
     case remote(canDownload: Bool)
 }
 
@@ -713,6 +742,7 @@ struct ResultArtifactRowContent: View {
     var thumbnail: CGImage? = nil
     var open: () -> Void = {}
     var download: () -> Void = {}
+    var cancel: () -> Void = {}
     var markReviewed: () -> Void = {}
 
     var body: some View {
@@ -774,9 +804,15 @@ struct ResultArtifactRowContent: View {
             } else {
                 ProgressView().controlSize(.small)
             }
-        case let .failed(message):
+            Button("Cancel", action: self.cancel).buttonStyle(.bordered)
+                .accessibilityIdentifier("result-cancel-download")
+        case let .failed(message, canRetry, canDownload):
             Text(message).foregroundStyle(.red).lineLimit(2)
-            Button("Retry", systemImage: "arrow.clockwise", action: self.download).buttonStyle(.bordered)
+            if canRetry {
+                Button("Retry", systemImage: "arrow.clockwise", action: self.download).buttonStyle(.bordered)
+                    .disabled(!canDownload)
+                if !canDownload { Text("Reconnect to retry").foregroundStyle(.secondary) }
+            }
         case let .remote(canDownload):
             Button("Get file", systemImage: "arrow.down.circle", action: self.download)
                 .buttonStyle(.bordered).disabled(!canDownload)
@@ -784,7 +820,11 @@ struct ResultArtifactRowContent: View {
         }
         if !self.reviewed {
             Button("Mark as reviewed", systemImage: "checkmark", action: self.markReviewed)
-                .buttonStyle(.borderless)
+                .buttonStyle(.bordered)
+                #if os(iOS)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+                #endif
                 .accessibilityIdentifier("result-mark-reviewed")
         }
     }
@@ -814,12 +854,17 @@ private struct StoreArtifactRow: View {
         case .downloading:
             let entry = self.store.downloads.entry(for: self.item)
             return .downloading(received: entry?.received ?? 0, total: entry?.total)
-        case let .failed(message): return .failed(message)
+        case let .failed(message):
+            return .failed(message, canRetry: self.store.downloads.entry(for: self.item)?.canRetry != false,
+                           canDownload: self.canDownload)
         case .cancelled, .none:
-            let connected: Bool = { if case .connected = self.store.connectionState { return true }; return false }()
-            let method = self.item.artifactID == nil ? "sessions.files.get" : "artifacts.download"
-            return .remote(canDownload: connected && self.store.gatewayMethods.contains(method))
+            return .remote(canDownload: self.canDownload)
         }
+    }
+
+    private var canDownload: Bool {
+        let method = self.item.artifactID == nil ? "sessions.files.get" : "artifacts.download"
+        return self.store.isGatewayConnected && self.store.gatewayMethods.contains(method)
     }
 
     var body: some View {
@@ -837,6 +882,7 @@ private struct StoreArtifactRow: View {
                 }
             },
             download: { self.store.startDownload(self.item) },
+            cancel: { self.store.downloads.cancel(self.item) },
             markReviewed: { self.store.markDeliverableReviewed(self.item.reviewID) })
             .task(id: self.item.reviewID) { await self.store.inspectDownload(self.item) }
             .task(id: availability) {

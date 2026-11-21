@@ -46,6 +46,16 @@ import SwiftUI
             if ProcessInfo.processInfo.arguments.contains("--results-fixture") {
                 let cast = "agent:main:cast-chat-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
                 let now = Date().timeIntervalSince1970 * 1000
+                // Fictional turn: the assistant reply precedes the artifacts it shared, so the
+                // in-chat card belongs to the latest turn. RunPR's reply is newer than any file.
+                func text(_ id: String, _ role: String, _ body: String, _ at: Double) -> ChatMessage {
+                    ChatMessage(id: id, role: role, blocks: [ChatContentBlock(type: "text", text: body, thinking: nil,
+                        name: nil, mimeType: nil, fileName: nil)], timestamp: at)
+                }
+                let transcripts = TranscriptCache(workspaceID: profile.id, root: root)
+                let castTurn = [text("u1", "user", "Make it easier to see which chats need me.", now - 300_000),
+                                text("a1", "assistant", "I put the state beside each chat. Files are attached.", now - 180_000)]
+                Task { await transcripts.save(castTurn, sessionKey: cast) }
                 store.installDeliverablesForTesting([
                     Deliverable(id: "fixture-a1", sessionKey: cast, messageID: "m2", title: "sidebar-states.png",
                                 target: "artifact:fixture-a1", kind: "Image", sharedAt: now - 60_000,
