@@ -97,7 +97,7 @@ final class MacOSWindowSizingTests: XCTestCase {
             XCTAssertEqual(window.frame.size, expected, "Inspector changes must not resize the window (cycle \(cycle))")
         }
         // Reviewing ends the in-chat card.
-        store.markDeliverablesReviewed(["f1:a"])
+        store.markDeliverablesReviewed(["f1"])
         XCTAssertEqual(store.resultArtifactCounts(for: key)?.unreviewed, 0)
         try await Task.sleep(for: .milliseconds(300))
         capture("mac-real-chatview-after-review.png")

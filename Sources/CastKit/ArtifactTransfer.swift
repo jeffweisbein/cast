@@ -159,7 +159,8 @@ public struct DeliverableFileCache: Sendable {
         SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
     public func url(for item: Deliverable) -> URL {
-        let key = SHA256.hash(data: Data(item.reviewID.utf8)).map { String(format: "%02x", $0) }.joined()
+        // Unchanged cache key (B5 changed review identity only), so existing downloads are kept.
+        let key = SHA256.hash(data: Data(item.downloadCacheID.utf8)).map { String(format: "%02x", $0) }.joined()
         var name = item.artifactID == nil ? (item.target as NSString).lastPathComponent : item.title
         name = ArtifactTransferPolicy.safeFilename(name)
         if (name as NSString).pathExtension.isEmpty,
