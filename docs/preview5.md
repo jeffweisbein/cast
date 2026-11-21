@@ -31,8 +31,9 @@ change TestFlight availability.
 
 The packaged app comes from `3715813059a17f997c2c580e3fd24936b1fd9161`. Its final native
 suite passed **676 tests, with no failures or skips**, on Xcode 27.1. macOS and iOS Simulator
-Release builds passed. The publication commit adds documentation only; product source,
-resources, dependencies, and build settings match that verified app revision.
+Release builds passed. Publication adds documentation and refreshes XcodeGen 2.47's
+project/scheme upgrade metadata and explicit default architecture selection. Product source,
+resources, dependencies, and target build settings match that verified app revision.
 
 The signed Mac package is checked independently for source/version metadata, nested
 signatures, and its preserved vendor-signed Hex helper. Apple notarization, a stapled ticket,
