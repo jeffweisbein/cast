@@ -28,13 +28,15 @@ enum ResultDesignFixture {
 
     static let chats: [Chat] = [
         Chat(id: "cast", title: "Cast", preview: "The chat list redesign is ready to look at.", minutesAgo: 1,
-             unread: true, state: .readyToReview(count: 3), pinned: true),
+             unread: true, state: .readyToReview(count: 2), pinned: true),
         Chat(id: "cackles", title: "Cackles", preview: "Checking audio on iPad.", minutesAgo: 2,
              unread: false, state: .working, pinned: true),
         Chat(id: "runpr", title: "RunPR", preview: "Which headline should lead the launch?", minutesAgo: 18,
              unread: false, state: .needsYou(.question), pinned: true),
         Chat(id: "ops", title: "Gateway ops", preview: "Restart approval is waiting.", minutesAgo: 25,
              unread: false, state: .needsYou(.approval), pinned: false),
+        Chat(id: "nightly", title: "Nightly build", preview: "Rebuilding the archive.", minutesAgo: 40,
+             unread: false, state: .needsYou(.stopped), pinned: false),
         Chat(id: "weekend", title: "Weekend plans", preview: "A few places worth trying.", minutesAgo: 60,
              unread: false, state: nil, pinned: false),
         Chat(id: "general", title: "General", preview: "Picking up where we left off.", minutesAgo: 180,
@@ -42,14 +44,18 @@ enum ResultDesignFixture {
     ]
 
     static let deliverables: [Deliverable] = [
-        Deliverable(id: "f1", sessionKey: "agent:main:cast", messageID: "m3", title: "Chat list state redesign",
-                    target: "https://github.com/example/cast/pull/42", kind: "Pull request", sharedAt: ms(minutesAgo: 2)),
-        Deliverable(id: "f2", sessionKey: "agent:main:cast", messageID: "m3", title: "sidebar-states-dark.png",
-                    target: "/tmp/fixture/sidebar-states-dark.png", kind: "Image", sharedAt: ms(minutesAgo: 3),
-                    sizeBytes: 482_113, mimeType: "image/png"),
+        Deliverable(id: "f1", sessionKey: "agent:main:cast", messageID: "m3", title: "sidebar-states-dark.png",
+                    target: "artifact:f1", kind: "Image", sharedAt: ms(minutesAgo: 2),
+                    artifactID: "f1", sizeBytes: 482_113, mimeType: "image/png"),
+        Deliverable(id: "f2", sessionKey: "agent:main:cast", messageID: "m3", title: "chat-states.patch",
+                    target: "artifact:f2", kind: "Attachment", sharedAt: ms(minutesAgo: 3),
+                    artifactID: "f2", sizeBytes: 18_330, mimeType: "text/x-diff"),
         Deliverable(id: "f3", sessionKey: "agent:main:cast", messageID: "m2", title: "verification-notes.md",
-                    target: "/tmp/fixture/verification-notes.md", kind: "Document", sharedAt: ms(minutesAgo: 9),
-                    sizeBytes: 6_204),
+                    target: "artifact:f3", kind: "Attachment", sharedAt: ms(minutesAgo: 9),
+                    artifactID: "f3", sizeBytes: 6_204, mimeType: "text/markdown"),
+        // An ordinary link: excluded from the result surfaces by design.
+        Deliverable(id: "l1", sessionKey: "agent:main:cast", messageID: "m3", title: "Pull request",
+                    target: "https://github.com/example/cast/pull/42", kind: "Pull request", sharedAt: ms(minutesAgo: 2)),
     ]
 
     static var summary: ChatResultSummary {
@@ -70,7 +76,7 @@ enum ResultDesignFixture {
     static let facts = ResultRunFacts(
         facts: [
             .init(label: "Agent", value: "Cast"),
-            .init(label: "Chat model", value: "claude-opus-5-5 · anthropic"),
+            .init(label: "Model (last reported)", value: "claude-opus-5-5 · anthropic"),
             .init(label: "Reasoning", value: "High"),
             .init(label: "Run", value: "Idle"),
             .init(label: "Context", value: "38% full"),
@@ -81,8 +87,7 @@ enum ResultDesignFixture {
 
     static func availability(_ item: Deliverable) -> ResultArtifactAvailability {
         switch item.id {
-        case "f1": return .web(URL(string: item.target)!)
-        case "f2": return .downloading(received: 301_000, total: 482_113)
+        case "f1": return .downloading(received: 301_000, total: 482_113)
         default: return .remote(canDownload: true)
         }
     }
@@ -173,8 +178,8 @@ struct ResultDesignFixtureView: View {
                 ChatResultCardContent(
                     summary: ChatResultSummary(sessionKey: "agent:main:cackles",
                         ledger: [Deliverable(id: "c1", sessionKey: "agent:main:cackles", messageID: "x",
-                            title: "ipad-audio-log.txt", target: "/tmp/fixture/ipad-audio-log.txt", kind: "Document",
-                            sharedAt: ResultDesignFixture.ms(minutesAgo: 40))],
+                            title: "ipad-audio-log.txt", target: "artifact:c1", kind: "Attachment",
+                            sharedAt: ResultDesignFixture.ms(minutesAgo: 40), artifactID: "c1")],
                         reviewed: [], progressCard: nil),
                     state: .working, openReview: {})
                 Text("Offline fixture · fictional result data").font(.caption2).foregroundStyle(.tertiary)
@@ -189,6 +194,7 @@ struct ResultDesignFixtureView: View {
             summary: ResultDesignFixture.summary,
             state: nil,
             progressCard: ResultDesignFixture.progressCard,
+            runIsActive: false,
             facts: ResultDesignFixture.facts,
             tab: Binding(get: { initial }, set: { _ in }),
             artifact: { item in

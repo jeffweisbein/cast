@@ -134,6 +134,7 @@ struct GitCommitGlyph: Shape {
 
 /// Attach to the outer navigation container, never its detail column. On macOS 15,
 /// a detail-column inspector registers a duplicate window separator and crashes.
+/// Result review shares this single attachment point.
 struct SideChatInspector: ViewModifier {
     let store: ChatStore
     @Binding var isPresented: Bool
@@ -142,14 +143,26 @@ struct SideChatInspector: ViewModifier {
         let known = store.sessions.contains { $0.key == key } || project != nil
         return known ? (project ?? "General") + " › Side chat" : "Side chat"
     }
+    /// The only trailing inspector in the window: Side chat or Result review, never both.
+    private var anyPresented: Binding<Bool> {
+        Binding(get: { isPresented || store.isResultReviewPresented },
+                set: { if !$0 { isPresented = false; store.isResultReviewPresented = false } })
+    }
     func body(content: Content) -> some View {
-        content.inspector(isPresented: $isPresented) {
-            if let chat = store.sideChat {
+        content.inspector(isPresented: anyPresented) {
+            if isPresented, let chat = store.sideChat {
                 SideChatView(chat: chat, scopeTitle: scopeTitle(for: chat.sessionKey)) {
                     store.closeSideChat()
                     isPresented = false
                 }
                 .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
+            } else if store.isResultReviewPresented {
+                ResultReviewInspector(store: store, isPresented: Binding(
+                    get: { store.isResultReviewPresented }, set: { store.isResultReviewPresented = $0 }))
+                    .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
+                    #if os(iOS)
+                    .presentationDetents([.medium, .large])
+                    #endif
             }
         }
     }

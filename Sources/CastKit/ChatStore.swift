@@ -385,6 +385,9 @@ public final class ChatStore {
     public private(set) var gatewayVersion: String?
     public private(set) var deliverableLedger = DeliverableLedger()
     public private(set) var reviewedWork = ReviewedWorkLedger()
+    /// Gateway-artifact counts per canonical session key, rebuilt only when the ledger or the
+    /// reviewed set actually changes so sidebar rows never scan the ledger.
+    public private(set) var resultArtifactCounts: [String: ResultArtifactCounts] = [:]
     @ObservationIgnored private let deliverableStore: AtomicJSONLedgerStore<DeliverableLedger>
     @ObservationIgnored private let reviewedWorkStore: AtomicJSONLedgerStore<ReviewedWorkLedger>
     @ObservationIgnored private var deliverableIndexTask: Task<Void, Never>?
@@ -569,8 +572,16 @@ public final class ChatStore {
     public var sideChatDiscoveryError: String? { sideChatStorageError ?? sideChatRefreshError ?? sideChatArchiveSyncError }
     public var isSideChatPresented = false {
         didSet {
+            // One trailing inspector: Side chat and Result review are mutually exclusive.
+            if isSideChatPresented, isResultReviewPresented { isResultReviewPresented = false }
             sideChatArchive.isPresented = isSideChatPresented
             persistSideChatArchive()
+        }
+    }
+    /// Transient UI state for the Result review inspector (not persisted).
+    public var isResultReviewPresented = false {
+        didSet {
+            if isResultReviewPresented, isSideChatPresented { isSideChatPresented = false }
         }
     }
     public var savedSideChats: [SavedSideChat] { sideChats(archived: false) }
@@ -1135,8 +1146,11 @@ public final class ChatStore {
         self.deliverableFiles = DeliverableFileCache(root: sidebarRoot.appendingPathComponent("Downloads"))
         self.deliverableStore = AtomicJSONLedgerStore(fileURL: sidebarRoot.appendingPathComponent("deliverables.json"))
         self.reviewedWorkStore = AtomicJSONLedgerStore(fileURL: sidebarRoot.appendingPathComponent("reviewed-work.json"))
-        self.deliverableLedger = (try? self.deliverableStore.load(defaultValue: DeliverableLedger())) ?? DeliverableLedger()
-        self.reviewedWork = (try? self.reviewedWorkStore.load(defaultValue: ReviewedWorkLedger())) ?? ReviewedWorkLedger()
+        let loadedDeliverables = (try? self.deliverableStore.load(defaultValue: DeliverableLedger())) ?? DeliverableLedger()
+        let loadedReviewed = (try? self.reviewedWorkStore.load(defaultValue: ReviewedWorkLedger())) ?? ReviewedWorkLedger()
+        self.deliverableLedger = loadedDeliverables
+        self.reviewedWork = loadedReviewed
+        self.resultArtifactCounts = ResultArtifactCounts.index(ledger: loadedDeliverables.items, reviewed: loadedReviewed.ids)
         let unreadStore = AtomicJSONLedgerStore<UnreadLedger>(
             fileURL: operationsRoot.appendingPathComponent("unread.json"))
         let notificationStore = AtomicJSONLedgerStore<NotificationDeliveryLedger>(
@@ -3630,6 +3644,7 @@ public final class ChatStore {
             do {
                 try self.deliverableStore.save(updated)
                 self.deliverableLedger = updated
+                self.refreshResultArtifactCounts()
             } catch { self.showError("Couldn’t save the deliverables index. Your conversation is unchanged.") }
         }
     }
@@ -3649,10 +3664,32 @@ public final class ChatStore {
             acknowledgedFailures: Set(self.projectInventoryRows.filter { self.isFailureAcknowledged($0) }.map(\.key)), now: date)
     }
 
+    /// Rebuilds the cached per-chat artifact counts; assigns only on change so observers
+    /// (sidebar, result card) are not invalidated by an identical ledger rewrite.
+    func refreshResultArtifactCounts() {
+        let counts = ResultArtifactCounts.index(ledger: self.deliverableLedger.items, reviewed: self.reviewedWork.ids)
+        if counts != self.resultArtifactCounts { self.resultArtifactCounts = counts }
+    }
+
+    /// Attention without deliverable review items, so the sidebar never observes or scans
+    /// the deliverable ledger; review state comes from `resultArtifactCounts`.
+    func workAttentionItems(at date: Date) -> [AttentionItem] {
+        let questions = questionInbox.sorted.filter { $0.request.isPending(at: date) }.map { entry in
+            AttentionItem(id: "question:" + entry.id, kind: .question, sessionKey: entry.request.sessionKey,
+                title: "Question waiting", detail: entry.request.questions.first?.question ?? "Answer requested", referenceID: entry.id)
+        }
+        return questions + AttentionReducer.items(
+            sessions: self.projectInventoryRows.filter { $0.archived != true }, approvals: self.approvals,
+            notifications: self.notificationRecords, deliverables: [],
+            reviewed: [], hidden: self.sidebarPreferences.hiddenKeys,
+            acknowledgedFailures: Set(self.projectInventoryRows.filter { self.isFailureAcknowledged($0) }.map(\.key)),
+            now: date)
+    }
+
     public func markDeliverableReviewed(_ id: String) {
         var ledger = self.reviewedWork
         ledger.ids.insert(id)
-        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger }
+        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger; self.refreshResultArtifactCounts() }
         catch { self.showError("Couldn’t save review status. Please try again.") }
     }
 
@@ -3687,6 +3724,7 @@ public final class ChatStore {
         ledger.ingest(artifacts: artifacts, sessionKey: sessionKey)
         try deliverableStore.save(ledger)
         deliverableLedger = ledger
+        refreshResultArtifactCounts()
     }
 
     public func fetchDeliverable(_ item: Deliverable,
@@ -4636,6 +4674,17 @@ public final class ChatStore {
             "installSessionSnapshotForTesting is for the test host only")
         self.sessions = sessions
         self.reconcileOperations(with: sessions)
+    }
+
+    /// Offline seam for result-review fixtures: replaces the in-memory ledger without saving.
+    func installDeliverablesForTesting(_ items: [Deliverable]) {
+        precondition(
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+            "installDeliverablesForTesting is for the test host only")
+        var ledger = DeliverableLedger()
+        ledger.ingestForTesting(items)
+        self.deliverableLedger = ledger
+        self.refreshResultArtifactCounts()
     }
     #endif
 

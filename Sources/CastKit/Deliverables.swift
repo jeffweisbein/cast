@@ -40,6 +40,12 @@ public struct DeliverableLedger: Codable, Sendable, Equatable {
         self.items = indexed.values.sorted { ($0.sharedAt ?? 0, $0.id) > ($1.sharedAt ?? 0, $1.id) }.prefix(1000).map { $0 }
     }
 
+    #if DEBUG
+    mutating func ingestForTesting(_ items: [Deliverable]) {
+        self.items = items
+    }
+    #endif
+
     public mutating func ingest(messages: [ChatMessage], sessionKey: String) {
         var indexed = Dictionary(self.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for item in DeliverableScanner.scan(messages: messages, sessionKey: sessionKey) {

@@ -8,20 +8,27 @@ import SwiftUI
 struct ChatWorkStateLabel: View {
     let state: ChatWorkState
     var font: Font = .caption.weight(.medium)
+    /// Only the open chat animates; a pulsing glyph per sidebar row costs list frames.
+    var animates = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Label {
+            // System orange/green text is below 4.5:1 on white at caption size, so in light
+            // mode only the glyph carries the colour.
             Text(self.state.label).lineLimit(1)
+                .foregroundStyle(self.colorScheme == .dark ? AnyShapeStyle(self.state.tint) : AnyShapeStyle(.primary))
         } icon: {
             Image(systemName: self.state.symbol)
-                .symbolEffect(.pulse, options: .repeating, isActive: self.state == .working && !self.reduceMotion)
+                .foregroundStyle(self.state.tint)
+                .symbolEffect(.pulse, options: .repeating,
+                              isActive: self.animates && self.state == .working && !self.reduceMotion)
         }
         .font(self.font)
-        .foregroundStyle(self.state.tint)
         .labelStyle(ChatWorkLabelStyle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(self.state.label)
+        .accessibilityLabel(self.state.accessibilityLabel)
     }
 }
 
@@ -41,8 +48,11 @@ extension ChatWorkState {
         case .needsYou(.approval): return "checkmark.shield.fill"
         case .needsYou(.blocked): return "person.fill"
         case .needsYou(.failure): return "exclamationmark.triangle.fill"
+        case .needsYou(.stopped): return "stop.circle"
+        case .needsYou(.checkReply): return "exclamationmark.bubble"
         case .needsYou(.delivery): return "bell.slash.fill"
         case .working: return "waveform.path"
+        case .workingLastKnown: return "wifi.slash"
         case .readyToReview: return "checkmark.circle"
         }
     }
@@ -52,6 +62,7 @@ extension ChatWorkState {
         case .needsYou(.failure): return .red
         case .needsYou: return .orange
         case .working: return .blue
+        case .workingLastKnown: return .secondary
         case .readyToReview: return .green
         }
     }
@@ -150,7 +161,10 @@ struct ChatFilterBar: View {
             .padding(.vertical, 5)
             .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: Capsule())
             .overlay(Capsule().strokeBorder(.quaternary, lineWidth: selected ? 0 : 1))
-            .contentShape(Capsule())
+            #if os(iOS)
+            .frame(minHeight: 44)
+            #endif
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(selected ? .primary : .secondary)
@@ -163,13 +177,15 @@ struct ChatFilterBar: View {
 // MARK: - Result card (in the conversation)
 
 /// Store-bound wrapper: its own view so deliverable/progress observation does not invalidate
-/// the transcript body. Shows nothing until this chat has shared files or links.
+/// the transcript body. Shows nothing until this chat has gateway artifacts; ordinary links
+/// in prose never produce a result card.
 struct ChatResultCard: View {
     let store: ChatStore
     let openReview: () -> Void
 
     var body: some View {
-        if let key = self.store.selectedSessionKey {
+        // Cached counts first: chats without gateway artifacts never scan the ledger.
+        if let key = self.store.selectedSessionKey, (self.store.resultArtifactCounts(for: key)?.total ?? 0) > 0 {
             let summary = self.store.resultSummary(for: key)
             if !summary.isEmpty {
                 ChatResultCardContent(
@@ -263,7 +279,7 @@ struct ResultStatusLine: View {
     var body: some View {
         if let state, state.filter != .review {
             // Live states (needs you / working) outrank a previously shared result.
-            ChatWorkStateLabel(state: state)
+            ChatWorkStateLabel(state: state, animates: true)
         } else if self.summary.unreviewedCount > 0 {
             ChatWorkStateLabel(state: .readyToReview(count: self.summary.unreviewedCount))
         } else {
@@ -272,7 +288,8 @@ struct ResultStatusLine: View {
     }
 
     private var reviewed: some View {
-        Label("Reviewed by you", systemImage: "checkmark.circle.fill")
+        // A local mark on this device over a partial ledger, not a verification.
+        Label("Marked reviewed on this device", systemImage: "checkmark.circle")
             .font(.caption.weight(.medium))
             .foregroundStyle(.secondary)
     }
@@ -305,16 +322,15 @@ struct ResultEvidenceStrip: View {
 
     @ViewBuilder private var progress: some View {
         if case let .agentReported(completed, total) = self.summary.progress {
-            Label("\(completed) of \(total) steps · agent-reported",
-                  systemImage: completed == total ? "checkmark.circle" : "circle.dotted")
+            Text("\(completed) of \(total) steps, as reported by the agent")
                 .foregroundStyle(.secondary)
         }
     }
 
     private var checks: some View {
-        Label("Checks not reported", systemImage: "circle.dashed")
+        Text("Checks and installation not reported")
             .foregroundStyle(.tertiary)
-            .accessibilityLabel("No build, test or installation receipt was reported")
+            .accessibilityLabel("No build, test or installation result was reported")
     }
 }
 
@@ -349,6 +365,7 @@ struct ResultReviewInspector: View {
                     summary: summary,
                     state: self.store.chatWorkState(for: key),
                     progressCard: self.store.progressCard(for: key),
+                    runIsActive: self.store.chatWorkState(for: key) == .working,
                     facts: ResultRunFacts(row: row, agentName: self.store.agentIdentity?.name,
                                           isLiveTurn: self.store.isAgentTurnActive),
                     tab: self.$tab,
@@ -375,6 +392,9 @@ struct ResultReviewInspector: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Done") { self.isPresented = false } }
         }
+        #endif
+        #if os(macOS)
+        .onExitCommand { self.isPresented = false }
         #endif
     }
 
@@ -413,7 +433,8 @@ struct ResultRunFacts: Equatable {
         if let agentName, !agentName.isEmpty { facts.append(Fact(label: "Agent", value: agentName)) }
         if let model = row?.model, !model.isEmpty {
             let provider = row?.modelInfo?.modelProvider.map { " · \($0)" } ?? ""
-            facts.append(Fact(label: "Chat model", value: model + provider))
+            // Selected/last reported for the session, not proof of which model answered.
+            facts.append(Fact(label: "Model (last reported)", value: model + provider))
         } else {
             missing.append("model")
         }
@@ -451,6 +472,8 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
     let summary: ChatResultSummary
     let state: ChatWorkState?
     let progressCard: ProgressCard?
+    /// Whether the gateway reports a live run; `in_progress` alone is the agent's declared phase.
+    var runIsActive = false
     let facts: ResultRunFacts
     @Binding var tab: ResultReviewTab
     @ViewBuilder let artifact: (Deliverable) -> ArtifactRow
@@ -495,7 +518,7 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
                 .font(.caption2.weight(.semibold))
                 .tracking(1.2)
                 .foregroundStyle(.secondary)
-            Text(self.summary.latest?.title ?? "No shared result yet")
+            Text(self.summary.latest?.title ?? "No shared files yet")
                 .font(.title2.weight(.semibold))
                 .lineLimit(3)
                 .textSelection(.enabled)
@@ -509,8 +532,8 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
 
     @ViewBuilder private var files: some View {
         if self.summary.items.isEmpty {
-            ContentUnavailableView("Nothing shared yet", systemImage: "tray",
-                description: Text("Files and links your agent shares in this chat appear here."))
+            ContentUnavailableView("No shared files yet", systemImage: "tray",
+                description: Text("Files your agent attaches in this chat appear here. Links stay in Deliverables."))
         } else {
             LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(self.summary.items.prefix(Self.visibleArtifactLimit)) { item in
@@ -518,16 +541,18 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
                 }
             }
             HStack {
-                if self.summary.items.count > Self.visibleArtifactLimit || self.summary.items.count > 1 {
-                    Button("All files from this chat", action: self.showAll).buttonStyle(.borderless)
-                }
+                Button("All files and links", action: self.showAll).buttonStyle(.borderless)
+                    .accessibilityIdentifier("result-show-all")
                 Spacer()
                 if self.summary.unreviewedCount > 1 {
-                    Button("Mark all reviewed", action: self.markAllReviewed).buttonStyle(.bordered)
+                    Button("Mark all as reviewed", action: self.markAllReviewed).buttonStyle(.bordered)
                         .accessibilityIdentifier("result-mark-all-reviewed")
                 }
             }
             .font(.callout)
+            Text("Review marks are kept on this device only.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -535,15 +560,17 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
         if let steps = self.progressCard?.steps, !steps.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    let live = step.status == .inProgress && self.runIsActive
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        ResultStepGlyph(status: step.status)
+                        ResultStepGlyph(status: step.status, live: live)
                         Text(step.step)
                             .font(.callout)
                             .foregroundStyle(step.status == .completed ? .secondary : .primary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(Self.stepStatus(step.status))
+                        Text(Self.stepStatus(step.status, live: live))
                             .font(.caption)
-                            .foregroundStyle(step.status == .inProgress ? Color.blue : Color.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .foregroundStyle(live ? Color.blue : Color.secondary)
                     }
                     .padding(.vertical, 9)
                     if index < steps.count - 1 { Divider() }
@@ -592,40 +619,38 @@ struct ResultReviewPanel<ArtifactRow: View>: View {
                 .tracking(1.2)
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 6)
-            EvidenceRow(symbol: self.summary.items.isEmpty ? "circle.dashed" : "checkmark.circle.fill",
-                        tint: self.summary.items.isEmpty ? .secondary : .green,
-                        title: "Shared",
-                        detail: self.summary.items.isEmpty ? "Nothing shared in this chat yet"
-                            : "\(self.summary.items.count) file\(self.summary.items.count == 1 ? "" : "s") or link\(self.summary.items.count == 1 ? "" : "s") in this chat")
-            EvidenceRow(symbol: self.summary.allReviewed ? "checkmark.circle.fill" : "eye",
-                        tint: self.summary.allReviewed ? .green : .blue,
-                        title: "Reviewed by you",
+            EvidenceRow(symbol: self.summary.items.isEmpty ? "circle.dashed" : "paperclip",
+                        tint: .secondary,
+                        title: "Shared files",
+                        detail: self.summary.items.isEmpty ? "None known for this chat yet"
+                            : "\(self.summary.items.count) gateway file\(self.summary.items.count == 1 ? "" : "s") in this chat")
+            EvidenceRow(symbol: "eye", tint: .secondary,
+                        title: "Marked reviewed on this device",
                         detail: self.summary.items.isEmpty ? "—"
+                            : self.summary.nothingLeftMarkedHere ? "Nothing left to review here"
                             : "\(self.summary.items.count - self.summary.unreviewedCount) of \(self.summary.items.count)")
             switch self.summary.progress {
             case let .agentReported(completed, total):
-                EvidenceRow(symbol: completed == total ? "checkmark.circle" : "circle.dotted", tint: .secondary,
-                            title: "Progress", detail: "\(completed) of \(total) steps, reported by the agent")
+                EvidenceRow(symbol: "checklist", tint: .secondary,
+                            title: "Progress", detail: "\(completed) of \(total) steps, as reported by the agent",
+                            showsDivider: false)
             case .notReported:
-                EvidenceRow(symbol: "circle.dashed", tint: .secondary, title: "Progress", detail: "Not reported")
+                EvidenceRow(symbol: "checklist", tint: .secondary, title: "Progress", detail: "Not reported",
+                            showsDivider: false)
             }
-            EvidenceRow(symbol: "circle.dashed", tint: .secondary, title: "Build and tests",
-                        detail: "Not reported — no check receipt in this chat")
-            EvidenceRow(symbol: "circle.dashed", tint: .secondary, title: "Installed",
-                        detail: "Not reported", showsDivider: false)
-            Text("Shared, reviewed, checked and installed are separate states. Cast shows only what this conversation reported.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            Text("Checks and installation are not reported by this gateway. A completed checklist is not verification.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .padding(.top, 8)
+                .accessibilityIdentifier("result-not-reported")
         }
-        .accessibilityIdentifier("result-evidence")
     }
 
-    private static func stepStatus(_ status: ProgressStepStatus) -> String {
+    static func stepStatus(_ status: ProgressStepStatus, live: Bool) -> String {
         switch status {
         case .completed: return "Done"
-        case .inProgress: return "Running"
-        case .pending, .unknown: return "Queued"
+        case .inProgress: return live ? "In progress" : "In progress, not currently running"
+        case .pending, .unknown: return "Not started"
         }
     }
 }
@@ -657,14 +682,16 @@ private struct EvidenceRow: View {
 
 private struct ResultStepGlyph: View {
     let status: ProgressStepStatus
+    let live: Bool
     var body: some View {
         switch self.status {
         case .completed:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Done")
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
         case .inProgress:
-            Image(systemName: "waveform.path").foregroundStyle(.blue).accessibilityLabel("Running")
+            Image(systemName: self.live ? "waveform.path" : "circle.dotted")
+                .foregroundStyle(self.live ? Color.blue : Color.secondary).accessibilityHidden(true)
         case .pending, .unknown:
-            Image(systemName: "clock").foregroundStyle(.secondary).accessibilityLabel("Queued")
+            Image(systemName: "circle").foregroundStyle(.secondary).accessibilityHidden(true)
         }
     }
 }
@@ -756,7 +783,7 @@ struct ResultArtifactRowContent: View {
             if !canDownload { Text("Reconnect to download").foregroundStyle(.secondary) }
         }
         if !self.reviewed {
-            Button("Mark reviewed", systemImage: "checkmark", action: self.markReviewed)
+            Button("Mark as reviewed", systemImage: "checkmark", action: self.markReviewed)
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("result-mark-reviewed")
         }

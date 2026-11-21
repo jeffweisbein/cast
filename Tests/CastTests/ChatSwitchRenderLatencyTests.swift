@@ -106,28 +106,37 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
         return parts.joined(separator: "\n\n")
     }
 
-    static func transcript(chat: Int, count: Int = messagesPerChat) -> [ChatMessage] {
+    static func transcript(chat: Int, count: Int = messagesPerChat, withArtifacts: Bool = false) -> [ChatMessage] {
         (0..<count).map { index in
             let isUser = index.isMultiple(of: 2)
             let text = isUser
                 ? "Synthetic request \(index) in chat \(chat): please continue."
                 : Self.assistantText(chat: chat, index: index)
+            var blocks = [ChatContentBlock(
+                type: "text", text: text, thinking: nil, name: nil, mimeType: nil, fileName: nil)]
+            // Results-bearing variant: every 25th reply attaches a gateway artifact, so the
+            // deliverable index, cached counts, sidebar states and result card all do work.
+            if withArtifacts, !isUser, index % 25 == 1 {
+                blocks.append(ChatContentBlock(
+                    type: "file", text: nil, thinking: nil, name: nil, mimeType: "image/png", fileName: nil,
+                    attachment: ManagedChatAttachment(artifactId: "art-\(chat)-\(index)", label: "result-\(index).png",
+                                                      mimeType: "image/png", sizeBytes: 40_000)))
+            }
             return ChatMessage(
                 id: "render-\(chat)-\(index)",
                 role: isUser ? "user" : "assistant",
-                blocks: [ChatContentBlock(
-                    type: "text", text: text, thinking: nil, name: nil, mimeType: nil, fileName: nil)],
+                blocks: blocks,
                 timestamp: Double(index) * 60_000)
         }
     }
 
-    private func makeStore() async -> ChatStore {
+    private func makeStore(withArtifacts: Bool = false) async -> ChatStore {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("CastRenderLatency-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = TranscriptCache(workspaceID: "render-latency", root: root)
         for chat in 0..<Self.chatCount {
-            await cache.save(Self.transcript(chat: chat), sessionKey: Self.key(chat))
+            await cache.save(Self.transcript(chat: chat, withArtifacts: withArtifacts), sessionKey: Self.key(chat))
         }
         return ChatStore(
             profile: .init(
@@ -149,11 +158,18 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
         self.setReaderIdle(true)
     }
 
-    private func host(_ store: ChatStore) -> NSWindow {
-        let view = NSHostingView(rootView: ChatView(store: store, allowsSending: false, showsComposer: false)
-            .environment(\.scenePhase, .active))
+    private func host(_ store: ChatStore, withSidebar: Bool = false) -> NSWindow {
+        let chat = ChatView(store: store, allowsSending: false, showsComposer: false)
+        let view: NSView = withSidebar
+            // Transcript first so `scrollView(in:)` (first NSScrollView, depth-first) keeps
+            // measuring the transcript, not the sidebar list.
+            ? NSHostingView(rootView: HStack(spacing: 0) {
+                chat
+                SessionListView(store: store).frame(width: 280)
+            }.environment(\.scenePhase, .active))
+            : NSHostingView(rootView: chat.environment(\.scenePhase, .active))
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 800),
+            contentRect: NSRect(x: 0, y: 0, width: withSidebar ? 1180 : 900, height: 800),
             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = view
         window.orderFront(nil)
@@ -284,6 +300,70 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
             XCTAssertLessThan(
                 sample.distanceFromBottom, 4,
                 "Growth above the viewport must leave the newest row in view (chat \(sample.chat))")
+        }
+    }
+
+    /// Same rotation with results-bearing chats: artifact attachments in every transcript, a
+    /// 1,000-item deliverable ledger, the production sidebar (states + filter) hosted beside
+    /// the chat, and the in-chat result card. The tail-first paint must be preserved.
+    func testResultsBearingRotationKeepsTailFirstPaint() async throws {
+        let store = await makeStore(withArtifacts: true)
+        let rows = (0..<Self.chatCount).map { chat in
+            SessionRow(key: Self.key(chat), kind: "direct", displayName: "Render \(chat)", derivedTitle: nil,
+                       lastMessagePreview: "Synthetic preview \(chat)", channel: nil, updatedAt: Double(chat) * 1000,
+                       unread: nil, pinned: nil, hasActiveRun: chat == 3, model: "test-model")
+        }
+        store.installSessionSnapshotForTesting(rows)
+        for (index, row) in rows.enumerated() {
+            store.updatePersonalChat(row.key) { $0.kept = true; $0.pinned = index < 3; $0.rank = Double(index) }
+        }
+        store.installDeliverablesForTesting((0..<1_000).map { index in
+            let chat = index % Self.chatCount
+            return Deliverable(id: "seed-\(index)", sessionKey: Self.key(chat), messageID: "seed-\(index)",
+                               title: "seed-\(index).png", target: "artifact:seed-\(index)", kind: "Image",
+                               sharedAt: Double(index), artifactID: "seed-\(index)")
+        })
+        XCTAssertEqual(store.resultArtifactCounts(for: Self.key(0))?.total, 143)
+        XCTAssertEqual(store.chatWorkStates(for: store.personalChats).count, Self.chatCount)
+        let window = host(store, withSidebar: true)
+        let probe = MainThreadStallProbe()
+        try await Task.sleep(for: .milliseconds(300))
+
+        var samples: [Sample] = []
+        for round in 0..<2 {
+            for chat in 0..<Self.chatCount {
+                let sample = try await measureSwitch(to: chat, round: round, store: store, window: window, probe: probe)
+                samples.append(sample)
+                print(String(format: "CHAT_SWITCH_RESULTS round=%d chat=%d stall_ms=%.0f first_paint_ms=%.0f settled_ms=%.0f",
+                             sample.round, sample.chat, sample.stallMilliseconds,
+                             sample.firstPaintMilliseconds, sample.settledMilliseconds))
+            }
+        }
+        // The selected chat's transcript attachments reach the ledger, and the cached counts
+        // stay coherent with a fresh index of that ledger.
+        let last = Self.key(Self.chatCount - 1)
+        XCTAssertGreaterThan(store.messages.reduce(0) { $0 + $1.managedAttachments.count }, 0,
+                             "The results-bearing transcript must carry gateway attachments")
+        var indexed = false
+        for _ in 0..<50 where !indexed {
+            indexed = store.deliverableLedger.items.contains { $0.artifactID?.hasPrefix("art-\(Self.chatCount - 1)-") == true }
+            if !indexed { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        XCTAssertTrue(indexed, "Selected chat's attachments must be indexed")
+        XCTAssertEqual(store.resultArtifactCounts(for: last),
+                       ResultArtifactCounts.index(ledger: store.deliverableLedger.items, reviewed: store.reviewedWork.ids)[last])
+        let later = samples.filter { $0.round > 0 }
+        func median(_ values: [Double]) -> Double { values.sorted()[values.count / 2] }
+        let medianFirstPaint = median(later.map(\.firstPaintMilliseconds))
+        let medianSettled = median(later.map(\.settledMilliseconds))
+        print(String(format: "CHAT_SWITCH_RESULTS_SUMMARY switches=%d median_stall_ms=%.0f worst_stall_ms=%.0f "
+                     + "median_first_paint_ms=%.0f median_settled_ms=%.0f",
+                     later.count, median(later.map(\.stallMilliseconds)), later.map(\.stallMilliseconds).max() ?? 0,
+                     medianFirstPaint, medianSettled))
+        XCTAssertLessThan(medianFirstPaint, medianSettled / 3,
+                          "Results-bearing chats must still paint the tail before the whole window")
+        for sample in later {
+            XCTAssertLessThan(sample.distanceFromBottom, 4, "Result card must not push the tail out of view (chat \(sample.chat))")
         }
     }
 

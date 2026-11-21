@@ -65,7 +65,6 @@ struct ChatView: View {
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
-    @State private var showingResultReview = false
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
@@ -280,7 +279,7 @@ struct ChatView: View {
         // Its own view: deliverable/progress observation stays out of this body. Placed
         // before approvals and questions so anything that needs the user stays nearest the
         // composer.
-        ChatResultCard(store: self.store) { self.showingResultReview = true }
+        ChatResultCard(store: self.store) { self.store.presentResultReview() }
             .id("result-card")
         if self.showAgentWork {
             ForEach(self.store.approvals) { approval in
@@ -742,20 +741,13 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .automatic) {
                 Button {
-                    self.showingResultReview.toggle()
+                    self.store.presentResultReview(!self.store.isResultReviewPresented)
                 } label: {
                     Label("Result", systemImage: "sidebar.trailing")
                 }
-                .help(self.showingResultReview ? "Hide result review" : "Review this chat's result, progress and details")
+                .help(self.store.isResultReviewPresented ? "Hide result review" : "Review this chat's files, progress and details")
                 .accessibilityIdentifier("result-review-toggle")
             }
-        }
-        .inspector(isPresented: self.$showingResultReview) {
-            ResultReviewInspector(store: self.store, isPresented: self.$showingResultReview)
-                .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
-                #if os(iOS)
-                .presentationDetents([.medium, .large])
-                #endif
         }
         .sheet(isPresented: self.$showingLibrary) {
             LibraryView(store: self.store)

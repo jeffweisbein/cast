@@ -1,28 +1,41 @@
 import Foundation
 
 extension ChatStore {
-    /// Computed once per sidebar evaluation (not per row) from already-loaded state: no
-    /// transcript parsing, no network. Keyed by canonical session key.
-    public func chatWorkStates(for rows: [SessionRow], at date: Date = Date()) -> [String: ChatWorkState] {
-        let reviewed = self.reviewedWork.ids
-        return ChatWorkStateReducer.states(
-            rows: rows,
-            attention: self.attentionItems(at: date),
-            unreviewedDeliverables: self.deliverableLedger.items.filter { !reviewed.contains($0.reviewID) },
-            liveSessionKey: self.selectedSessionKey,
-            liveTurnActive: self.isAgentTurnActive)
+    public var isGatewayConnected: Bool {
+        if case .connected = self.connectionState { return true }
+        return false
     }
 
+    /// Computed once per sidebar evaluation (not per row) from already-loaded state: no
+    /// transcript parsing, no network, no ledger scan. Keyed by canonical session key.
+    public func chatWorkStates(for rows: [SessionRow], at date: Date = Date()) -> [String: ChatWorkState] {
+        ChatWorkStateReducer.states(
+            rows: rows,
+            attention: self.workAttentionItems(at: date),
+            artifactCounts: self.resultArtifactCounts,
+            liveSessionKey: self.selectedSessionKey,
+            liveTurnActive: self.isAgentTurnActive,
+            connected: self.isGatewayConnected)
+    }
+
+    /// Runs the attention reduction for one chat. Intended for the selected chat's card and
+    /// inspector only; rows must read the dictionary from `chatWorkStates(for:)` instead.
     public func chatWorkState(for sessionKey: String) -> ChatWorkState? {
-        guard let row = self.sessions.first(where: { SessionKeyMatcher.matches($0.key, sessionKey) })
+        let row = self.sessions.first(where: { SessionKeyMatcher.matches($0.key, sessionKey) })
             ?? self.personalChats.first(where: { SessionKeyMatcher.matches($0.key, sessionKey) })
-        else {
-            // No inventory row yet: only the live turn can be stated truthfully.
-            return self.isAgentTurnActive && SessionKeyMatcher.matches(self.selectedSessionKey, sessionKey) ? .working : nil
+        guard let row else {
+            // No inventory row yet: only the live turn can be stated.
+            guard self.isAgentTurnActive, SessionKeyMatcher.matches(self.selectedSessionKey, sessionKey) else { return nil }
+            return self.isGatewayConnected ? .working : .workingLastKnown
         }
         return self.chatWorkStates(for: [row])[SessionKeyMatcher.canonical(row.key)]
     }
 
+    public func resultArtifactCounts(for sessionKey: String) -> ResultArtifactCounts? {
+        self.resultArtifactCounts[SessionKeyMatcher.canonical(sessionKey)]
+    }
+
+    /// Scans the ledger; call only after `resultArtifactCounts(for:)` shows artifacts exist.
     public func resultSummary(for sessionKey: String) -> ChatResultSummary {
         ChatResultSummary(sessionKey: sessionKey, ledger: self.deliverableLedger.items,
                           reviewed: self.reviewedWork.ids, progressCard: self.progressCard(for: sessionKey))
@@ -31,5 +44,9 @@ extension ChatStore {
     public func sessionRow(for sessionKey: String?) -> SessionRow? {
         guard let sessionKey else { return nil }
         return self.sessions.first { SessionKeyMatcher.matches($0.key, sessionKey) }
+    }
+
+    public func presentResultReview(_ presented: Bool = true) {
+        self.isResultReviewPresented = presented
     }
 }

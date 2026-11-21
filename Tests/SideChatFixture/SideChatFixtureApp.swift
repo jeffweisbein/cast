@@ -33,9 +33,31 @@ import SwiftUI
                 ["key": "agent:main:cast-chat-cccccccc-cccc-4ccc-8ccc-cccccccccccc", "sessionId": "runpr-id", "displayName": "RunPR"],
                 ["key": "agent:main:main", "sessionId": "general-id", "displayName": "General"]
             ]
+            if ProcessInfo.processInfo.arguments.contains("--results-fixture") {
+                // Fictional offline signals: Cackles reports an active run, RunPR an agent
+                // attention note. Not connected, so "working" must read as last known.
+                rows[1]["hasActiveRun"] = true
+                rows[2]["agentStatus"] = ["note": "Pick a headline", "attention": "input",
+                                          "expiresAt": Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000]
+            }
             for index in 0..<100 { rows.append(["key": "agent:main:probe-\(index)", "sessionId": "probe-\(index)", "displayName": "Unrelated diagnostic probe \(index)", "category": "General"]) }
             rows.append(["key": "agent:main:subagent:background", "spawnedBy": "agent:main:main", "displayName": "Background reviewer", "isBackground": true])
             store.installSessionSnapshotForTesting(try! JSONDecoder().decode(SessionsListResponse.self, from: JSONSerialization.data(withJSONObject: ["sessions": rows])).sessions)
+            if ProcessInfo.processInfo.arguments.contains("--results-fixture") {
+                let cast = "agent:main:cast-chat-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                let now = Date().timeIntervalSince1970 * 1000
+                store.installDeliverablesForTesting([
+                    Deliverable(id: "fixture-a1", sessionKey: cast, messageID: "m2", title: "sidebar-states.png",
+                                target: "artifact:fixture-a1", kind: "Image", sharedAt: now - 60_000,
+                                artifactID: "fixture-a1", sizeBytes: 482_113, mimeType: "image/png"),
+                    Deliverable(id: "fixture-a2", sessionKey: cast, messageID: "m1", title: "verification-notes.md",
+                                target: "artifact:fixture-a2", kind: "Attachment", sharedAt: now - 120_000,
+                                artifactID: "fixture-a2", sizeBytes: 6_204, mimeType: "text/markdown"),
+                    // An ordinary link in General's prose: must not produce a review state.
+                    Deliverable(id: "fixture-link", sessionKey: "agent:main:main", messageID: "m9", title: "Release notes",
+                                target: "https://example.com/notes.pdf", kind: "Document", sharedAt: now - 30_000),
+                ])
+            }
             if ProcessInfo.processInfo.arguments.contains("--reset-fixture") {
                 for (index, row) in rows.prefix(4).enumerated() {
                     store.updatePersonalChat(row["key"] as! String) { $0.kept = true; $0.pinned = true; $0.rank = Double(index) }
