@@ -39,6 +39,12 @@ enum TranscriptGrowthPacing {
     static let stepIntervalMilliseconds = 60
     static let busyPollMilliseconds = 150
 
+    #if DEBUG
+    // Test instrumentation: responsiveness alone cannot identify the end of staging.
+    // Absent from release builds and never used to decide production behavior.
+    static var didGrowWindow: ((String?, Int) -> Void)?
+    #endif
+
     /// Seconds since the reader last used the keyboard, mouse or trackpad. Replaceable so
     /// tests neither depend on nor are disturbed by whoever is using the machine.
     static var secondsSinceUserInput: () -> Double = {
@@ -470,7 +476,12 @@ struct ChatView: View {
             guard TranscriptGrowthPacing.secondsSinceUserInput()
                 >= TranscriptGrowthPacing.idleSecondsBeforeGrowth
             else { continue }
-            guard self.transcriptWindow.growTowardInitialWindow() else { return }
+            let hasMore = self.transcriptWindow.growTowardInitialWindow()
+            #if DEBUG
+            TranscriptGrowthPacing.didGrowWindow?(
+                trigger.sessionKey, self.transcriptWindow.requestedItemCount)
+            #endif
+            guard hasMore else { return }
         }
     }
 

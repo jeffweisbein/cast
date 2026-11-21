@@ -152,9 +152,20 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
         TranscriptGrowthPacing.secondsSinceUserInput = { idle ? .infinity : 0 }
     }
 
+    private var completedGrowth: Set<String> = []
+
     override func setUp() async throws {
         let original = TranscriptGrowthPacing.secondsSinceUserInput
-        addTeardownBlock { @MainActor in TranscriptGrowthPacing.secondsSinceUserInput = original }
+        let originalGrowthObserver = TranscriptGrowthPacing.didGrowWindow
+        addTeardownBlock { @MainActor in
+            TranscriptGrowthPacing.secondsSinceUserInput = original
+            TranscriptGrowthPacing.didGrowWindow = originalGrowthObserver
+        }
+        TranscriptGrowthPacing.didGrowWindow = { [weak self] key, count in
+            if let key, count >= TranscriptWindow.defaultInitialItemCount {
+                self?.completedGrowth.insert(key)
+            }
+        }
         self.setReaderIdle(true)
     }
 
@@ -204,6 +215,7 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
         quietMilliseconds: Double = 400) async throws -> Sample
     {
         probe.reset()
+        self.completedGrowth.remove(Self.key(chat))
         let start = DispatchTime.now().uptimeNanoseconds
         store.selectedSessionKey = Self.key(chat)
         let deadline = start + 20_000_000_000
@@ -220,15 +232,11 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
                 if height > 0 { firstPaintHeight = min(firstPaintHeight ?? height, height) }
             }
             let quietSince = max(reading.lastBusyEnd, start)
-            // A responsive gap is not proof that the asynchronous staging task finished.
-            // Hosted Macs can yield for 400 ms between the first paint and growth; sampling
-            // that gap mislabeled the small first-paint window as the final document.
-            // Require observed growth as well as responsiveness, keeping the same deadline
-            // and all assertions below. Missing growth must time out, never pass early.
-            let grewPastFirstPaint = firstPaintHeight.map {
-                self.documentHeight(window) > $0 * 2
-            } ?? false
-            if loaded, grewPastFirstPaint,
+            // A responsive gap is not proof that asynchronous staging finished. Hosted
+            // Macs can yield for 400 ms between slices, including after the first paint.
+            // Observe the final window step, then wait for layout responsiveness; the
+            // same deadline and every performance/growth assertion remain in force.
+            if loaded, self.completedGrowth.contains(Self.key(chat)),
                Double(now - quietSince) / 1_000_000 >= quietMilliseconds {
                 func elapsed(_ end: UInt64) -> Double { end > start ? Double(end - start) / 1_000_000 : 0 }
                 return Sample(
