@@ -220,7 +220,16 @@ final class ChatSwitchRenderLatencyTests: XCTestCase {
                 if height > 0 { firstPaintHeight = min(firstPaintHeight ?? height, height) }
             }
             let quietSince = max(reading.lastBusyEnd, start)
-            if loaded, Double(now - quietSince) / 1_000_000 >= quietMilliseconds {
+            // A responsive gap is not proof that the asynchronous staging task finished.
+            // Hosted Macs can yield for 400 ms between the first paint and growth; sampling
+            // that gap mislabeled the small first-paint window as the final document.
+            // Require observed growth as well as responsiveness, keeping the same deadline
+            // and all assertions below. Missing growth must time out, never pass early.
+            let grewPastFirstPaint = firstPaintHeight.map {
+                self.documentHeight(window) > $0 * 2
+            } ?? false
+            if loaded, grewPastFirstPaint,
+               Double(now - quietSince) / 1_000_000 >= quietMilliseconds {
                 func elapsed(_ end: UInt64) -> Double { end > start ? Double(end - start) / 1_000_000 : 0 }
                 return Sample(
                     round: round, chat: chat,
