@@ -42,6 +42,7 @@ an installable app; building requires Xcode 26.3 or newer and XcodeGen.
 - Streams answers and structured agent activity in real time
 - Shows conversation work states, in-chat result cards, and a focused result-review inspector
 - Reuses prepared conversations and renders the newest messages first for faster Mac chat switching
+- Keeps the latest message visible during transcript expansion, including on macOS 15
 - Syncs authoritative unread state and shows native macOS Dock badges
 - Searches conversations and keeps local media/link libraries
 - Accepts text, URLs, images, and files through the iOS Share Extension

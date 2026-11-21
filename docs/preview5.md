@@ -29,11 +29,15 @@ change TestFlight availability.
 
 ## Verification and source mapping
 
-The packaged app comes from `3715813059a17f997c2c580e3fd24936b1fd9161`. Its final native
-suite passed **676 tests, with no failures or skips**, on Xcode 27.1. macOS and iOS Simulator
-Release builds passed. Publication adds documentation and refreshes XcodeGen 2.47's
-project/scheme upgrade metadata and explicit default architecture selection. Product source,
-resources, dependencies, and target build settings match that verified app revision.
+The Mac package includes the results design and a compatibility fix for macOS 15: staged
+transcript expansion explicitly reapplies the latest-message position while following is
+active. It stops doing so when the reader scrolls away or starts a search. The same native
+regression failed on the unchanged source and passed with the fix on macOS 15.6.1; no
+assertions or timing thresholds were removed.
+
+The release notes record the exact embedded source revision and final native test/build
+results. Publication also refreshes XcodeGen 2.47's project/scheme upgrade metadata and
+explicit default architecture selection; target build settings are unchanged.
 
 The signed Mac package is checked independently for source/version metadata, nested
 signatures, and its preserved vendor-signed Hex helper. Apple notarization, a stapled ticket,
@@ -41,6 +45,5 @@ Gatekeeper acceptance, and the published ZIP checksum are separate release check
 Hosted CI results are available on the release pull request; the local suite is not a claim
 about hosted CI or physical responsiveness on every Mac.
 
-The native suite retained an existing SwiftUI test-fixture warning. An earlier attempt did
-not finalize its result bundle; the completed serial run supplies the passing count above.
-Physical feature acceptance and live gateway compatibility remain environment-dependent.
+Native warnings remain documented separately from successful checks. Physical feature
+acceptance and live gateway compatibility remain environment-dependent.

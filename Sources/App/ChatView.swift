@@ -406,6 +406,7 @@ struct ChatView: View {
     private struct TailUpdate: Equatable {
         let sessionKey: String?
         let revision: Int
+        let visibleItemCount: Int
         let text: String
         let reasoning: String
         let active: Bool
@@ -413,6 +414,7 @@ struct ChatView: View {
 
     private var tailUpdate: TailUpdate {
         TailUpdate(sessionKey: store.selectedSessionKey, revision: store.transcriptRevision,
+                   visibleItemCount: self.visibleItems.count,
                    text: store.streamingText, reasoning: store.streamingReasoningText,
                    active: store.isAgentTurnActive)
     }
@@ -477,6 +479,9 @@ struct ChatView: View {
         .task(id: self.tailUpdate) {
             let sessionKey = self.store.selectedSessionKey
             guard self.followState.followsLatest, self.focusedSearchItemID == nil else { return }
+            // Staged growth changes visible rows without changing transcriptRevision.
+            // Older macOS scroll views can retain their previous offset through that
+            // growth despite the size-change anchor, so reapply the tail for each slice.
             // Let the new rows enter layout first. Recheck intent afterwards: a wheel
             // gesture or search during this yield must cancel the automatic movement.
             await Task.yield()
