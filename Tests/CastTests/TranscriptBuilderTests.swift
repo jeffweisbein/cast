@@ -997,4 +997,43 @@ final class TranscriptRealtimeLayoutTests: XCTestCase {
         }
     }
 }
+/// Exercise the real AppKit frame notification and clip origin, including the two
+/// reasons automatic following must stop. No SwiftUI timing threshold is relaxed.
+final class TranscriptNativeTailAnchorTests: XCTestCase {
+    @MainActor
+    func testDocumentGrowthFollowsTailButPreservesReaderAndSearchPosition() throws {
+        final class FlippedDocument: NSView { override var isFlipped: Bool { true } }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let document = FlippedDocument(frame: NSRect(x: 0, y: 0, width: 600, height: 1_000))
+        scroll.documentView = document
+        var followsLatest = true
+        var isSearching = false
+        let anchor = TranscriptTailAnchor.AnchorView { followsLatest && !isSearching }
+        document.addSubview(anchor)
+        anchor.attach()
+        document.setFrameSize(NSSize(width: 600, height: 2_000))
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, document.bounds.maxY, accuracy: 1)
+
+        followsLatest = false
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+        document.setFrameSize(NSSize(width: 600, height: 3_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 100, accuracy: 1,
+                       "Rows arriving while reading earlier messages must not pull the reader down")
+
+        followsLatest = true
+        isSearching = true
+        document.setFrameSize(NSSize(width: 600, height: 4_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 100, accuracy: 1,
+                       "Search owns the visible position even if follow intent was retained")
+
+        isSearching = false
+        anchor.attach()
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, document.bounds.maxY, accuracy: 1)
+        anchor.stop()
+        let stoppedOrigin = scroll.contentView.bounds.origin.y
+        document.setFrameSize(NSSize(width: 600, height: 5_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, stoppedOrigin, accuracy: 1,
+                       "Dismantled observers must not move their former transcript")
+    }
+}
 #endif

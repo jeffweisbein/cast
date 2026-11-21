@@ -29,9 +29,9 @@ change TestFlight availability.
 
 ## Verification and source mapping
 
-The Mac package includes the results design and a compatibility fix for macOS 15: staged
-transcript expansion explicitly reapplies the latest-message position while following is
-active. It stops doing so when the reader scrolls away or starts a search. The same native
+The Mac package includes the results design and a compatibility fix for macOS 15: the native
+scroll view preserves the latest-message position when the document frame grows and following
+is active. It stops doing so when the reader scrolls away or starts a search. The same native
 regression failed on the unchanged source and passed with the fix on macOS 15.6.1; no
 assertions or timing thresholds were removed.
 

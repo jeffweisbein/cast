@@ -310,6 +310,11 @@ struct ChatView: View {
         ScrollView {
             self.transcriptStack
             .scrollTargetLayout()
+            #if os(macOS)
+            .background(TranscriptTailAnchor {
+                self.followState.followsLatest && self.focusedSearchItemID == nil
+            })
+            #endif
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: 760)
@@ -406,7 +411,6 @@ struct ChatView: View {
     private struct TailUpdate: Equatable {
         let sessionKey: String?
         let revision: Int
-        let visibleItemCount: Int
         let text: String
         let reasoning: String
         let active: Bool
@@ -414,7 +418,6 @@ struct ChatView: View {
 
     private var tailUpdate: TailUpdate {
         TailUpdate(sessionKey: store.selectedSessionKey, revision: store.transcriptRevision,
-                   visibleItemCount: self.visibleItems.count,
                    text: store.streamingText, reasoning: store.streamingReasoningText,
                    active: store.isAgentTurnActive)
     }
@@ -479,9 +482,6 @@ struct ChatView: View {
         .task(id: self.tailUpdate) {
             let sessionKey = self.store.selectedSessionKey
             guard self.followState.followsLatest, self.focusedSearchItemID == nil else { return }
-            // Staged growth changes visible rows without changing transcriptRevision.
-            // Older macOS scroll views can retain their previous offset through that
-            // growth despite the size-change anchor, so reapply the tail for each slice.
             // Let the new rows enter layout first. Recheck intent afterwards: a wheel
             // gesture or search during this yield must cancel the automatic movement.
             await Task.yield()
@@ -1928,6 +1928,70 @@ private struct ComposerModelIndicator: View {
 }
 
 #if os(macOS)
+/// Keep the native document's bottom attached as its actual frame changes. SwiftUI's
+/// size-change anchor can run before staged rows finish layout on macOS 15; requesting
+/// another SwiftUI scroll from that same update still races the final document size.
+/// This observer changes only the clip origin, never the rows or the reader's intent.
+struct TranscriptTailAnchor: NSViewRepresentable {
+    let shouldFollow: () -> Bool
+
+    func makeNSView(context: Context) -> AnchorView { AnchorView(shouldFollow: self.shouldFollow) }
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.shouldFollow = self.shouldFollow
+        view.attach()
+    }
+    static func dismantleNSView(_ view: AnchorView, coordinator: ()) { view.stop() }
+
+    final class AnchorView: NSView {
+        var shouldFollow: () -> Bool
+        private weak var observedDocument: NSView?
+
+        init(shouldFollow: @escaping () -> Bool) {
+            self.shouldFollow = shouldFollow
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if self.window == nil { self.stop() } else { self.attach() }
+        }
+        override func layout() {
+            super.layout()
+            self.attach()
+        }
+        func attach() {
+            guard let document = self.enclosingScrollView?.documentView else { return }
+            if self.observedDocument !== document {
+                self.stop()
+                self.observedDocument = document
+                document.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(self.documentFrameChanged),
+                    name: NSView.frameDidChangeNotification, object: document)
+            }
+            self.reanchor()
+        }
+        @objc private func documentFrameChanged(_ notification: Notification) { self.reanchor() }
+        private func reanchor() {
+            guard self.shouldFollow(), let scroll = self.enclosingScrollView,
+                  let document = self.observedDocument, scroll.documentView === document else { return }
+            let clip = scroll.contentView
+            let bottom = document.isFlipped
+                ? max(document.bounds.minY, document.bounds.maxY - clip.bounds.height)
+                : document.bounds.minY
+            guard abs(clip.bounds.origin.y - bottom) > 0.5 else { return }
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: bottom))
+            scroll.reflectScrolledClipView(clip)
+        }
+        func stop() {
+            NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: self.observedDocument)
+            self.observedDocument = nil
+        }
+        deinit { NotificationCenter.default.removeObserver(self) }
+    }
+}
+
 /// Observe only real scroll input delivered to this transcript's window and bounds.
 /// Never consume the event: native scrolling, momentum and accessibility remain AppKit's.
 private struct TranscriptWheelObserver: NSViewRepresentable {
