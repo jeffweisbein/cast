@@ -142,11 +142,11 @@ final class IOSPolishUITests: XCTestCase {
     private func dismissKeyboard(_ app: XCUIApplication) {
         let keyboard = app.keyboards.firstMatch
         guard keyboard.exists else { return }
-        let hide = app.buttons["Hide keyboard"]
+        let hide = app.buttons["Hide keyboard"].firstMatch
         if hide.exists, hide.isHittable { hide.tap() } else {
             app.buttons["chat-actions-menu"].tap()
-            XCTAssertTrue(app.buttons["Hide keyboard"].waitForExistence(timeout: 5))
-            app.buttons["Hide keyboard"].tap()
+            XCTAssertTrue(app.buttons["Hide keyboard"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["Hide keyboard"].firstMatch.tap()
         }
         XCTAssertTrue(self.gone(keyboard), "The keyboard must dismiss through the production Hide keyboard action")
     }
