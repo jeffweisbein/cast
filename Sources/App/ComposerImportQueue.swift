@@ -93,15 +93,36 @@ final class ComposerImportQueue {
         self.items.removeAll { $0.target == target && !$0.isPreparing }
     }
 
-    /// Runs `work` off the main actor and hands a successful result to `deliver`. A result
-    /// that arrives after the tile was cancelled goes to `discard` and is never attached.
+    /// True while any import for this draft is still being prepared; sending waits for it so
+    /// an attachment can never land in the draft after its message has gone.
+    func hasPreparing(for target: Target) -> Bool {
+        self.items.contains { $0.target == target && $0.isPreparing }
+    }
+
+    func preparingCount(for target: Target) -> Int {
+        self.items.filter { $0.target == target && $0.isPreparing }.count
+    }
+
+    /// Settles a tile from the destination draft's own answer: accepted removes it, anything
+    /// else keeps it visible with the reason, including after the operator switched chats.
+    func settle(_ id: UUID, outcome: ChatStore.AttachmentDeliveryOutcome) {
+        if let message = outcome.failureMessage {
+            self.fail(id, message: message)
+        } else {
+            self.finish(id)
+        }
+    }
+
+    /// Runs `work` off the main actor and hands a successful result to `deliver`, which
+    /// reports whether the destination draft accepted it. A result that arrives after the
+    /// tile was cancelled goes to `discard` and is never attached.
     @discardableResult
     func enqueue(
         title: String,
         symbol: String,
         target: Target,
         work: @escaping @Sendable () async throws -> PreparedAttachment,
-        deliver: @escaping @MainActor (PreparedAttachment) -> Void,
+        deliver: @escaping @MainActor (PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome,
         discard: @escaping @MainActor (PreparedAttachment) -> Void = { $0.removeOwnedFile() }) -> UUID
     {
         let id = self.begin(title: title, symbol: symbol, target: target)
@@ -118,13 +139,40 @@ final class ComposerImportQueue {
             }
             switch result {
             case let .success(attachment):
-                deliver(attachment)
-                self.finish(id)
+                self.settle(id, outcome: deliver(attachment))
             case let .failure(error):
                 self.fail(id, message: error.localizedDescription)
             }
         }
         self.attach(task, to: id)
         return id
+    }
+
+    /// Delivery that cannot be refused (kept for callers and tests that own the destination).
+    @discardableResult
+    func enqueue(
+        title: String,
+        symbol: String,
+        target: Target,
+        work: @escaping @Sendable () async throws -> PreparedAttachment,
+        deliver: @escaping @MainActor (PreparedAttachment) -> Void,
+        discard: @escaping @MainActor (PreparedAttachment) -> Void = { $0.removeOwnedFile() }) -> UUID
+    {
+        self.enqueue(title: title, symbol: symbol, target: target, work: work,
+                     deliver: { (attachment: PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome in
+                         deliver(attachment); return .accepted
+                     },
+                     discard: discard)
+    }
+}
+
+/// Shared composer limits: the minimum touch target and the one stated reason Send waits.
+enum ComposerSendGate {
+    static let minimumHitTarget: CGFloat = 44
+    static let waitingMessage = "Send waits until attachments finish preparing."
+
+    static func waitingLabel(count: Int) -> String {
+        count == 1 ? "Preparing 1 attachment — Send waits until it’s ready."
+            : "Preparing \(count) attachments — Send waits until they’re ready."
     }
 }

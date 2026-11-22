@@ -1128,9 +1128,19 @@ struct Composer: View, Equatable {
     #endif
 
     private var sendDisabled: Bool {
-        !self.allowsSending || self.dictation.phase != .idle
+        !self.allowsSending || self.dictation.phase != .idle || self.waitingForImports
             || (self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && self.model.pendingAttachments.isEmpty)
+    }
+
+    /// An import for this draft is still being prepared. Sending now would let it land in the
+    /// draft after its message had gone, so every send path waits (button, Return, voice).
+    private var waitingForImports: Bool {
+        #if os(iOS)
+        self.imports.hasPreparing(for: self.store.attachmentDraftTarget)
+        #else
+        false
+        #endif
     }
 
     #if os(macOS)
@@ -1419,7 +1429,8 @@ struct Composer: View, Equatable {
                 .foregroundStyle(.secondary)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(.quaternary.opacity(0.5)))
-                .contentShape(Circle())
+                .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add photos, files, or options")
@@ -1623,12 +1634,21 @@ struct Composer: View, Equatable {
                     .foregroundStyle(self.sendDisabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.white))
             }
             .frame(width: Self.sendButtonSide, height: Self.sendButtonSide)
+            #if os(iOS)
+            // The circle stays compact; the hit area meets the 44pt minimum.
+            .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget)
+            .contentShape(Rectangle())
+            #else
             .contentShape(Circle())
+            #endif
         }
         .buttonStyle(.plain)
+        #if os(macOS)
         .padding(.vertical, 4)
+        #endif
         .disabled(self.sendDisabled)
         .accessibilityLabel("Send message")
+        .accessibilityHint(self.waitingForImports ? ComposerSendGate.waitingMessage : "")
     }
 
     private func restoreDraft() {
@@ -1652,7 +1672,7 @@ struct Composer: View, Equatable {
     }
 
     private func sendDraft() {
-        guard self.allowsSending, self.dictation.phase == .idle else { return }
+        guard self.allowsSending, self.dictation.phase == .idle, !self.waitingForImports else { return }
         guard !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !self.model.pendingAttachments.isEmpty else { return }
         if self.model.deliverExternally {
             self.confirmingDelivery = true
@@ -1665,6 +1685,11 @@ struct Composer: View, Equatable {
     /// exact draft/send path images use, so frame validation and the external-delivery
     /// confirmation both still apply.
     private func sendVoiceMessage() {
+        // Keep the preview: promoting it now would strand it beside an unfinished import.
+        guard !self.waitingForImports else {
+            self.store.showError(ComposerSendGate.waitingMessage)
+            return
+        }
         do {
             let attachment = try self.voiceRecorder.makeAttachment()
             self.store.addAttachments([attachment])
@@ -1749,20 +1774,14 @@ struct Composer: View, Equatable {
             }
         }
         guard !Task.isCancelled, self.imports.isPreparing(importID) else { return }
-        if !prepared.isEmpty {
-            if self.store.attachmentDraftTarget == target {
-                self.store.addAttachments(prepared)
-            } else {
-                // The operator moved on while these were being prepared. Deliver to the
-                // draft they were picked for; the store validates and owns each one.
-                for attachment in prepared {
-                    self.store.finishAttachmentPreparation(.success(attachment), target: target)
-                }
-            }
-            committed = true
-        }
-        if let first = failures.first {
-            self.imports.retitle(importID, failures.count == 1 ? "1 item not attached" : "\(failures.count) items not attached")
+        // Delivered to the draft they were picked for, even if the operator has moved on;
+        // that draft validates the batch and its answer settles this tile.
+        let outcome = self.store.deliverPreparedAttachments(prepared, target: target)
+        committed = true
+        var notAttached = failures.count
+        if outcome != .accepted { notAttached += prepared.count }
+        if let first = outcome.failureMessage ?? failures.first {
+            self.imports.retitle(importID, notAttached == 1 ? "1 item not attached" : "\(notAttached) items not attached")
             self.imports.fail(importID, message: first)
         } else {
             self.imports.finish(importID)
@@ -1780,7 +1799,9 @@ struct Composer: View, Equatable {
                 symbol: "doc",
                 target: target,
                 work: { try await AttachmentProcessor.prepareForSending(url: url) },
-                deliver: { store.finishAttachmentPreparation(.success($0), target: target) })
+                deliver: { (attachment: PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome in
+                    store.deliverPreparedAttachments([attachment], target: target)
+                })
         }
     }
     #endif
@@ -1843,7 +1864,9 @@ struct Composer: View, Equatable {
                     }
                     return try AttachmentProcessor.prepareImage(data: data, fileName: "Pasted Image")
                 },
-                deliver: { store.finishAttachmentPreparation(.success($0), target: target) })
+                deliver: { (attachment: PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome in
+                    store.deliverPreparedAttachments([attachment], target: target)
+                })
         }
     }
     #endif

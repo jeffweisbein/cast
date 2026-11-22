@@ -99,6 +99,24 @@ struct SessionModelSheetState: Equatable {
         return effort
     }
 
+    /// The reasoning selection after the operator picks `model`. A level the destination
+    /// lists is kept. The override already in force is kept when the destination does not
+    /// report levels at all (support unknown, so nothing is reset). Only a destination that
+    /// lists levels without it returns to the default, and the sheet says so.
+    static func effortAfterSelecting(_ model: GatewayModelChoice?, currentEffort: String, override: String?) -> String {
+        guard !currentEffort.isEmpty else { return "" }
+        let levels = model?.thinkingLevels ?? []
+        if levels.contains(where: { $0.id == currentEffort }) { return currentEffort }
+        if levels.isEmpty, model != nil, currentEffort == (override ?? "") { return currentEffort }
+        return ""
+    }
+
+    /// The raw override reported for the conversation, used unchanged as the sheet's
+    /// starting point so opening the sheet never proposes a change by itself.
+    static func initialEffort(override: String?) -> String {
+        override?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     var currentChoice: GatewayModelChoice? {
         Self.choice(matching: self.sessionModel, provider: self.sessionProvider, in: self.choices)
     }
@@ -160,7 +178,27 @@ struct SessionModelSheetState: Equatable {
     /// Why there is no reasoning control, when the selected model does not offer one.
     var reasoningUnavailableNote: String? {
         guard let choice = self.selectedChoice, self.effortOptions.isEmpty else { return nil }
+        if let override = self.thinkingOverride, !override.isEmpty, self.selectedEffort == override {
+            return "\(choice.name) does not report adjustable reasoning levels. The current setting (\(override)) is left as it is."
+        }
         return "\(choice.name) does not report adjustable reasoning levels."
+    }
+
+    /// Said whenever applying would return reasoning to the default only because the chosen
+    /// model does not offer the current level.
+    var overrideResetNote: String? {
+        guard let override = self.thinkingOverride, !override.isEmpty, self.selectedEffort.isEmpty,
+              let selected = self.selectedChoice, selected.reference != self.currentChoice?.reference,
+              !self.effortOptions.isEmpty, !self.effortOptions.contains(where: { $0.id == override })
+        else { return nil }
+        return "\(selected.name) does not offer the current reasoning level (\(override)), so it will use the model default."
+    }
+
+    /// The reported override, untouched by the operator: never re-validated against a
+    /// catalog that may simply not list it.
+    private var keepsReportedOverride: Bool {
+        guard let override = self.thinkingOverride, !override.isEmpty else { return false }
+        return self.selectedEffort == override
     }
 
     var hasChanges: Bool {
@@ -175,10 +213,11 @@ struct SessionModelSheetState: Equatable {
         if !self.isConnected { return "Reconnect to change this conversation’s model." }
         guard let selected = self.selectedChoice else { return "Choose a model." }
         if selected.available == false { return "\(selected.name) is unavailable right now." }
-        if !self.selectedEffort.isEmpty, !self.effortOptions.contains(where: { $0.id == self.selectedEffort }) {
+        if !self.hasChanges { return "Already set for this conversation." }
+        if !self.selectedEffort.isEmpty, !self.keepsReportedOverride,
+           !self.effortOptions.contains(where: { $0.id == self.selectedEffort }) {
             return "Choose a reasoning level this model supports."
         }
-        if !self.hasChanges { return "Already set for this conversation." }
         return nil
     }
 

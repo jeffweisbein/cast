@@ -135,7 +135,8 @@ struct SessionModelSettingsView: View {
                     isCurrent: model.reference == state.currentChoice?.reference)
                 {
                     self.reference = model.reference
-                    self.effort = SessionModelSheetState.carriedEffort(self.effort, to: model)
+                    self.effort = SessionModelSheetState.effortAfterSelecting(
+                        model, currentEffort: self.effort, override: self.session?.modelInfo?.thinkingLevel)
                     self.error = nil
                 }
             }
@@ -158,6 +159,11 @@ struct SessionModelSettingsView: View {
                 SessionEffortSelector(
                     options: [ThinkingOption(id: "", label: state.defaultEffortLabel)] + state.effortOptions,
                     selection: self.$effort)
+            }
+            if let note = state.overrideResetNote {
+                Label(note, systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("Reasoning")
@@ -216,9 +222,10 @@ struct SessionModelSettingsView: View {
                 provider: self.session?.modelInfo?.modelProvider,
                 in: self.choices)
             self.reference = current?.reference ?? ""
-            // Start from the override already in force so that choosing only a model does
-            // not clear it.
-            self.effort = SessionModelSheetState.carriedEffort(self.session?.modelInfo?.thinkingLevel, to: current)
+            // Start from exactly what is in force, even when the catalog does not list it:
+            // opening the sheet must never propose a change, and Apply stays "Already set"
+            // until the operator picks something.
+            self.effort = SessionModelSheetState.initialEffort(override: self.session?.modelInfo?.thinkingLevel)
             self.error = nil
         } catch {
             self.error = error.localizedDescription
@@ -286,7 +293,8 @@ private struct SessionEffortSelector: View {
                             .padding(.horizontal, 14)
                             .frame(minHeight: 36)
                             .background(Capsule().fill(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary)))
-                            .contentShape(Capsule())
+                            .frame(minHeight: ComposerSendGate.minimumHitTarget)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(isSelected ? .isSelected : [])

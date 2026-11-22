@@ -83,7 +83,7 @@ struct ComposerModelIndicator: View {
         .foregroundStyle(.secondary)
         .opacity(self.isConnected ? 1 : 0.6)
         .padding(.horizontal, 8)
-        .frame(minHeight: 36)
+        .frame(minHeight: ComposerSendGate.minimumHitTarget)
         .contentShape(Rectangle())
     }
 }

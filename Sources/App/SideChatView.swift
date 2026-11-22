@@ -150,20 +150,23 @@ struct SideChatInspector: ViewModifier {
     }
     func body(content: Content) -> some View {
         content.inspector(isPresented: anyPresented) {
-            if isPresented, let chat = store.sideChat {
-                SideChatView(chat: chat, scopeTitle: scopeTitle(for: chat.sessionKey)) {
-                    store.closeSideChat()
-                    isPresented = false
+            // One stable column contract for both occupants. Keep its content alive through
+            // dismissal rather than swapping to EmptyView while AppKit finishes closing.
+            Group {
+                if isPresented, let chat = store.sideChat {
+                    SideChatView(chat: chat, scopeTitle: scopeTitle(for: chat.sessionKey)) {
+                        store.closeSideChat()
+                        isPresented = false
+                    }
+                } else {
+                    ResultReviewInspector(store: store, isPresented: Binding(
+                        get: { store.isResultReviewPresented }, set: { store.isResultReviewPresented = $0 }))
                 }
-                .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
-            } else if store.isResultReviewPresented {
-                ResultReviewInspector(store: store, isPresented: Binding(
-                    get: { store.isResultReviewPresented }, set: { store.isResultReviewPresented = $0 }))
-                    .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
-                    #if os(iOS)
-                    .presentationDetents([.medium, .large])
-                    #endif
             }
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 560)
+            #if os(iOS)
+            .presentationDetents([.medium, .large])
+            #endif
         }
     }
 }

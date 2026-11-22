@@ -18,6 +18,8 @@ struct ComposerAttachmentTray: View {
 
     static let tileSide: CGFloat = 56
 
+    private var preparingCount: Int { self.imports.filter(\.isPreparing).count }
+
     private var hasTiles: Bool { !self.attachments.isEmpty || !self.imports.isEmpty }
 
     private var tileIDs: [UUID] { self.attachments.map(\.id) + self.imports.map(\.id) }
@@ -53,6 +55,14 @@ struct ComposerAttachmentTray: View {
                     }
                     .accessibilityIdentifier("composer-attachment-tray")
                 }
+                if self.preparingCount > 0 {
+                    Label(ComposerSendGate.waitingLabel(count: self.preparingCount), systemImage: "hourglass")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
+                        .accessibilityIdentifier("composer-send-waiting")
+                }
                 if self.deliversExternally {
                     ComposerExternalDeliveryChip(onDisable: self.onDisableExternalDelivery)
                         .padding(.horizontal, 12)
@@ -83,7 +93,9 @@ private struct ComposerExternalDeliveryChip: View {
             .padding(.horizontal, 10)
             .frame(minHeight: 30)
             .background(Capsule().fill(.red.opacity(0.12)))
-            .contentShape(Capsule())
+            // The capsule stays compact; the safety off-switch keeps a full 44pt hit area.
+            .frame(minHeight: ComposerSendGate.minimumHitTarget)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("External delivery enabled")
@@ -128,7 +140,9 @@ private struct ComposerTileRemoveButton: View {
                 .foregroundStyle(.white)
                 .frame(width: 20, height: 20)
                 .background(Circle().fill(.black.opacity(0.62)))
-                .frame(width: 32, height: 32, alignment: .topTrailing)
+                .padding(6)
+                .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget,
+                       alignment: .topTrailing)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -141,6 +155,12 @@ private struct ComposerTileCard<Leading: View>: View {
     let detail: String
     let detailIsWarning: Bool
     @ViewBuilder let leading: () -> Leading
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var textWidth: CGFloat {
+        let base: CGFloat = self.detailIsWarning ? 230 : 150
+        return self.dynamicTypeSize.isAccessibilitySize ? base * 1.6 : base
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -154,14 +174,16 @@ private struct ComposerTileCard<Leading: View>: View {
                 Text(self.detail)
                     .font(.caption2)
                     .foregroundStyle(self.detailIsWarning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                    .lineLimit(2)
+                    .lineLimit(self.dynamicTypeSize.isAccessibilitySize ? 4 : 2)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: self.detailIsWarning ? 230 : 150, alignment: .leading)
+            .frame(maxWidth: self.textWidth, alignment: .leading)
         }
         .padding(.leading, 10)
-        .padding(.trailing, 30)
-        .frame(height: ComposerAttachmentTray.tileSide)
+        .padding(.trailing, 38)
+        .padding(.vertical, 6)
+        // Grows with Dynamic Type instead of clipping the name and reason.
+        .frame(minHeight: ComposerAttachmentTray.tileSide)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary.opacity(0.6)))
     }
 }
@@ -195,7 +217,6 @@ struct ComposerAttachmentTile: View {
         }
         .overlay(alignment: .topTrailing) {
             ComposerTileRemoveButton(label: "Remove \(self.attachment.fileName)", action: self.onRemove)
-                .padding(3)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Attachment \(self.attachment.fileName), \(self.sizeText)")
@@ -275,7 +296,6 @@ struct ComposerImportTile: View {
             ComposerTileRemoveButton(
                 label: self.failure == nil ? "Cancel \(self.item.title)" : "Dismiss \(self.item.title)",
                 action: self.onCancel)
-                .padding(3)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(self.failure.map { "Could not attach \(self.item.title). \($0)" }

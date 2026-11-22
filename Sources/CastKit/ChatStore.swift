@@ -2239,8 +2239,11 @@ public final class ChatStore {
               let model = self.modelCatalog.first(where: { $0.reference == reference })
         else { throw ModelControlError.unavailable }
         let row = self.sessions.first { $0.key == key }
+        // An override already in force is left alone (no `/think` is sent), so it is not
+        // re-validated against a catalog that may simply not list its levels.
+        let unchangedEffort = effort != nil && effort == row?.modelInfo?.thinkingLevel
         let params = try SessionModelMutation.params(key: key, sessionID: row?.modelInfo?.sessionId,
-                                                     model: model, effort: effort)
+                                                     model: model, effort: unchangedEffort ? nil : effort)
         let generation = clientGeneration
         self.savingModelKeys.insert(key)
         defer { self.savingModelKeys.remove(key) }
@@ -3417,20 +3420,56 @@ public final class ChatStore {
     var attachmentDraftTarget: AttachmentDraftTarget {
         AttachmentDraftTarget(workspaceID: profile.id, gatewayURL: profile.gatewayURL, sessionKey: selectedSessionKey)
     }
-    func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) {
-        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else {
-            if case let .success(attachment) = result { attachment.removeOwnedFile() }; return
+    /// What happened to prepared attachments handed to a draft. Anything not `.accepted` has
+    /// already had its owned files removed; the caller only reports it.
+    enum AttachmentDeliveryOutcome: Equatable, Sendable {
+        case accepted
+        case rejected(String)
+        /// The draft it was prepared for no longer exists in this store.
+        case discarded
+
+        var failureMessage: String? {
+            switch self {
+            case .accepted: return nil
+            case let .rejected(message): return message
+            case .discarded: return "The draft this was prepared for is no longer open, so it was not attached."
+            }
         }
+    }
+
+    /// Adds a prepared batch to the draft it was prepared for, all or nothing, validated
+    /// against that draft (not whichever chat is on screen). Sets no global error: the
+    /// caller reports the outcome where the operator started the import.
+    @discardableResult
+    func deliverPreparedAttachments(_ attachments: [PreparedAttachment], target: AttachmentDraftTarget) -> AttachmentDeliveryOutcome {
+        guard !attachments.isEmpty else { return .accepted }
+        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL,
+              target.sessionKey != nil || selectedSessionKey == nil else {
+            attachments.forEach { $0.removeOwnedFile() }
+            return .discarded
+        }
+        let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
+        do { try AttachmentProcessor.validateBatch(existing + attachments) }
+        catch {
+            attachments.forEach { $0.removeOwnedFile() }
+            return .rejected(error.localizedDescription)
+        }
+        if let key = target.sessionKey { attachmentDrafts[key, default: []].append(contentsOf: attachments) }
+        else { unselectedAttachments.append(contentsOf: attachments) }
+        return .accepted
+    }
+
+    @discardableResult
+    func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) -> AttachmentDeliveryOutcome {
         switch result {
         case let .success(attachment):
-            let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
-            do { try AttachmentProcessor.validateBatch(existing + [attachment]) }
-            catch { attachment.removeOwnedFile(); if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }; return }
-            if let key = target.sessionKey { attachmentDrafts[key, default: []].append(attachment) }
-            else if selectedSessionKey == nil { unselectedAttachments.append(attachment) }
-            else { attachment.removeOwnedFile() }
+            let outcome = deliverPreparedAttachments([attachment], target: target)
+            if case let .rejected(message) = outcome, target.sessionKey == selectedSessionKey { lastError = message }
+            return outcome
         case let .failure(error):
+            guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else { return .discarded }
             if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }
+            return .rejected(error.localizedDescription)
         }
     }
     public func addAttachment(url: URL) {
