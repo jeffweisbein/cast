@@ -648,6 +648,18 @@ struct ChatView: View {
                     allowsSending: self.allowsSending,
                     focused: self.$composerFocused)
                     .equatable()
+                    #if os(iOS)
+                    // The attachment tray, import tiles and a growing draft all change the
+                    // detached composer's height, which shrinks the transcript's real frame.
+                    // Attachment count alone misses a tray that appears for an import still
+                    // being prepared, so follow the height itself.
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height.rounded()
+                    } action: { _ in
+                        guard self.followState.followsLatest else { return }
+                        self.scrollToBottom(animated: false)
+                    }
+                    #endif
             }
         } else {
             self.transcriptView
@@ -1065,6 +1077,9 @@ struct Composer: View, Equatable {
     @FocusState.Binding var focused: Bool
     @State private var model: ComposerModel
     private let storeIdentity: ObjectIdentifier
+    /// Imports chosen but not yet attached. Owned per store rather than per view, so it
+    /// survives leaving and reopening a conversation.
+    private let imports: ComposerImportQueue
     @State private var draft = ""
     @State private var importing = false
     @State private var importTarget: ChatStore.AttachmentDraftTarget?
@@ -1094,6 +1109,7 @@ struct Composer: View, Equatable {
         self._focused = focused
         self._model = State(wrappedValue: ComposerModel(store: store))
         self.storeIdentity = ObjectIdentifier(store)
+        self.imports = ComposerImportQueue.queue(for: store)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -1103,9 +1119,12 @@ struct Composer: View, Equatable {
     @State private var sendPulse = 0
     @State private var showingPhotos = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
-    @State private var importingMedia = false
-    @State private var mediaImportID = UUID()
-    @State private var photoImportTask: Task<Void, Never>?
+    /// The draft the photo picker was opened for. Like `importTarget` for files, it is
+    /// captured before the picker appears so a selection change behind the picker cannot
+    /// redirect the photos.
+    @State private var photoTarget: ChatStore.AttachmentDraftTarget?
+    /// Whether the keyboard should come back when the model sheet closes.
+    @State private var refocusAfterModelSheet = false
     #endif
 
     private var sendDisabled: Bool {
@@ -1131,8 +1150,10 @@ struct Composer: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             self.inputCard
+            #if os(macOS)
             ComposerModelIndicator(store: self.store)
                 .padding(.horizontal, 16)
+            #endif
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
@@ -1215,19 +1236,15 @@ struct Composer: View, Equatable {
         .onChange(of: self.selectedPhotos) { _, items in
             guard !items.isEmpty else { return }
             self.selectedPhotos = []
-            self.photoImportTask?.cancel()
-            let target = self.store.attachmentDraftTarget
-            let importID = UUID()
-            self.mediaImportID = importID
-            self.photoImportTask = Task { await self.importPhotos(items, target: target, importID: importID) }
-        }
-        .onChange(of: self.model.selectedSessionKey) { _, _ in
-            self.photoImportTask?.cancel()
-            self.photoImportTask = nil
-        }
-        .onDisappear {
-            self.photoImportTask?.cancel()
-            self.photoImportTask = nil
+            let target = self.photoTarget ?? self.store.attachmentDraftTarget
+            self.photoTarget = nil
+            self.imports.clearFailures(for: target)
+            let importID = self.imports.begin(
+                title: items.count == 1 ? "Photo or video" : "\(items.count) photos and videos",
+                symbol: "photo",
+                target: target)
+            let task = Task { await self.importPhotos(items, target: target, importID: importID) }
+            self.imports.attach(task, to: importID)
         }
         #endif
         .fileImporter(
@@ -1238,7 +1255,11 @@ struct Composer: View, Equatable {
             let target = self.importTarget
             self.importTarget = nil
             if case let .success(urls) = result, let target {
+                #if os(iOS)
+                self.importFiles(urls, target: target)
+                #else
                 for url in urls { self.store.addAttachment(url: url, target: target) }
+                #endif
             } else if case let .failure(error) = result { self.store.showError(error.localizedDescription) }
         }
         .confirmationDialog(
@@ -1267,6 +1288,172 @@ struct Composer: View, Equatable {
         }
     }
 
+    private var dictationStatusRow: some View {
+        HStack {
+            if self.dictation.phase == .recording { Image(systemName: "record.circle").foregroundStyle(.red) }
+            else { ProgressView().controlSize(.small) }
+            Text(self.dictation.status).font(.caption)
+            Spacer()
+            if self.dictation.phase == .recording { Button("Finish") { self.dictation.finish() } }
+            Button("Cancel") { self.dictation.cancel() }
+        }.padding(.horizontal, 12).padding(.top, 8)
+    }
+
+    #if os(iOS)
+    /// Two rows inside one card: the message on top, every control on the bottom edge where
+    /// a thumb already is. Attachments, imports and the external-delivery state sit above
+    /// the message and take no space when there is nothing to show.
+    private var inputCard: some View {
+        let target = self.store.attachmentDraftTarget
+        let capturing = self.voiceRecorder.isCapturing
+        return VStack(alignment: .leading, spacing: 0) {
+            ComposerAttachmentTray(
+                attachments: self.model.pendingAttachments,
+                imports: self.imports.items(for: target),
+                upload: self.store.currentUploadProgress,
+                deliversExternally: self.model.deliverExternally,
+                onRemove: { self.store.removeAttachment(id: $0.id) },
+                onCancelImport: { self.imports.cancel($0) },
+                onCancelUpload: { self.store.cancelCurrentUploads() },
+                onDisableExternalDelivery: { self.store.deliverExternally = false })
+            if self.dictation.phase != .idle {
+                self.dictationStatusRow
+            }
+            if self.voiceRecorder.stoppedAtLimit, case .preview = self.voiceRecorder.state {
+                VoiceLimitNotice()
+                    .padding(.top, 8)
+            }
+            if case let .preview(recording) = self.voiceRecorder.state {
+                VoicePreviewRow(
+                    recording: recording,
+                    onDelete: { self.voiceRecorder.cancel() },
+                    onSend: { self.sendVoiceMessage() })
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+            } else {
+                Group {
+                    if capturing {
+                        VoiceRecordingIndicator(controller: self.voiceRecorder)
+                    } else {
+                        self.messageField
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                HStack(spacing: 2) {
+                    if !capturing {
+                        self.addMenu
+                    }
+                    Spacer(minLength: 4)
+                    if !capturing {
+                        ComposerModelIndicator(store: self.store, style: .chip) { presented in
+                            self.modelSheetPresentationChanged(presented)
+                        }
+                    }
+                    if self.allowsSending {
+                        // One structural slot in both states, so the in-flight hold gesture
+                        // survives the idle → recording swap of the row above.
+                        VoiceRecordButton(controller: self.voiceRecorder)
+                            .disabled(self.dictation.phase != .idle)
+                            .padding(4)
+                    }
+                    // Hidden rather than removed while recording: removing it would slide
+                    // the microphone sideways under the finger that is holding it.
+                    self.sendButton
+                        .opacity(capturing ? 0 : 1)
+                        .allowsHitTesting(!capturing)
+                        .accessibilityHidden(capturing)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+            }
+        }
+        .background(
+            GlassCapsule()
+                .overlay {
+                    if self.dropTargeted {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(.tint, lineWidth: 2)
+                    }
+                })
+    }
+
+    /// The single entry point for everything that can be added to a message. Only sources
+    /// this build can really attach are listed.
+    private var addMenu: some View {
+        Menu {
+            Section {
+                Button("Photos & Videos", systemImage: "photo.on.rectangle") {
+                    self.photoTarget = self.store.attachmentDraftTarget
+                    self.showingPhotos = true
+                }
+                Button("Files", systemImage: "folder") {
+                    self.importTarget = self.store.attachmentDraftTarget
+                    self.importing = true
+                }
+                Button("Paste Image", systemImage: "doc.on.clipboard") {
+                    self.importFromUIPasteboard()
+                }
+            }
+            if self.allowsSending {
+                Section {
+                    Button(
+                        self.dictation.phase == .recording ? "Finish Dictation" : "Dictate into Draft",
+                        systemImage: "waveform.badge.mic")
+                    {
+                        if self.dictation.phase == .recording { self.dictation.finish() }
+                        else if let context = self.model.selectedSessionKey { self.dictation.start(context: context) }
+                    }
+                    .disabled(self.dictation.phase == .preparing || self.dictation.phase == .transcribing)
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    Toggle(isOn: Binding(
+                        get: { self.model.deliverExternally },
+                        set: { self.store.deliverExternally = $0 }))
+                    {
+                        Label("Deliver Replies Externally", systemImage: "paperplane")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(.quaternary.opacity(0.5)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add photos, files, or options")
+        .accessibilityIdentifier("composer-add-menu")
+    }
+
+    private func modelSheetPresentationChanged(_ presented: Bool) {
+        if presented {
+            self.refocusAfterModelSheet = self.focused
+        } else if self.refocusAfterModelSheet {
+            self.refocusAfterModelSheet = false
+            self.focused = true
+        }
+    }
+
+    private var messageField: some View {
+        TextField("Message the fleet…", text: self.$draft, axis: .vertical)
+            .textFieldStyle(.plain)
+            .lineLimit(1 ... 12)
+            // Keep the empty field at its intrinsic one-line height inside the
+            // detached VStack. It still grows through the line-limit range, and
+            // Dynamic Type remains free to increase each line's intrinsic height.
+            .fixedSize(horizontal: false, vertical: true)
+            .focused(self.$focused)
+            .onSubmit { self.sendDraft() }
+            .onAppear {
+                self.focused = true
+                self.installDiagnosticDraftIfRequested()
+            }
+            .padding(.vertical, 8)
+    }
+    #endif
+
+    #if os(macOS)
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let progress = self.store.currentUploadProgress {
@@ -1275,20 +1462,13 @@ struct Composer: View, Equatable {
                     Button("Cancel") { self.store.cancelCurrentUploads() }
                 }.font(.caption).padding(.horizontal, 8)
             }
-            #if os(iOS)
-            if self.importingMedia {
-                ProgressView("Preparing photos and videos…").font(.caption).padding(.horizontal, 8)
-            }
-            #endif
             if !self.model.pendingAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(self.model.pendingAttachments) { attachment in
                             AttachmentChip(attachment: attachment) {
                                 self.store.removeAttachment(id: attachment.id)
-                                #if os(macOS)
                                 if attachment.fileName == "Cast-window-context.txt" { self.desktopAccess.stop() }
-                                #endif
                             }
                         }
                     }
@@ -1297,16 +1477,8 @@ struct Composer: View, Equatable {
                 }
             }
             if self.dictation.phase != .idle {
-                HStack {
-                    if self.dictation.phase == .recording { Image(systemName: "record.circle").foregroundStyle(.red) }
-                    else { ProgressView().controlSize(.small) }
-                    Text(self.dictation.status).font(.caption)
-                    Spacer()
-                    if self.dictation.phase == .recording { Button("Finish") { self.dictation.finish() } }
-                    Button("Cancel") { self.dictation.cancel() }
-                }.padding(.horizontal, 12).padding(.top, 8)
+                self.dictationStatusRow
             }
-            #if os(macOS)
             if let window = self.desktopAccess.activeWindow {
                 HStack {
                     Image(systemName: "macwindow")
@@ -1315,7 +1487,6 @@ struct Composer: View, Equatable {
                     Button("Stop access", role: .destructive) { self.desktopAccess.stop(); if self.store.isAgentTurnActive { self.store.abortActiveRun() } }
                 }.padding(.horizontal, 12).padding(.top, 8)
             }
-            #endif
             if self.voiceRecorder.stoppedAtLimit, case .preview = self.voiceRecorder.state {
                 VoiceLimitNotice()
             }
@@ -1367,7 +1538,6 @@ struct Composer: View, Equatable {
             .help("Dictate into this draft")
             .accessibilityLabel("Dictate into draft")
             .keyboardShortcut("d", modifiers: [.command, .shift])
-            #if os(macOS)
             Menu {
                 Button("Dictation Setup…") { self.showingDictationSetup = true }
                 Button("Attach a Window…") { self.showingDesktopPicker = true }
@@ -1380,30 +1550,7 @@ struct Composer: View, Equatable {
             .padding(.vertical, 4)
             .help("Local dictation and desktop agents")
             .disabled(self.dictation.phase != .idle)
-            #endif
         }
-        #if os(iOS)
-        Menu {
-            Button(self.importingMedia ? "Preparing media…" : "Photos & Videos", systemImage: "photo.on.rectangle") {
-                self.showingPhotos = true
-            }.disabled(self.importingMedia)
-            Button("Files", systemImage: "folder") {
-                self.importTarget = self.store.attachmentDraftTarget; self.importing = true
-            }
-            Button("Paste Image", systemImage: "doc.on.clipboard") {
-                self.importFromUIPasteboard()
-            }
-        } label: {
-            Image(systemName: "paperclip")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .padding(.vertical, 4)
-        .accessibilityLabel("Attach photo or file")
-        #else
         Button { self.importTarget = self.store.attachmentDraftTarget; self.importing = true } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 15, weight: .medium))
@@ -1414,8 +1561,6 @@ struct Composer: View, Equatable {
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .accessibilityLabel("Attach image or file")
-        #endif
-        #if os(macOS)
         // NSTextView representable so we control the insets ourselves; a SwiftUI
         // placeholder overlaid at the same origin lines up 1:1 with the caret.
         // Explicit height off the draft (line count) drives the scroll container
@@ -1440,22 +1585,6 @@ struct Composer: View, Equatable {
         }
         .frame(height: self.macOSComposerHeight)
         .animation(.easeOut(duration: 0.12), value: self.macOSComposerHeight)
-        #else
-        TextField("Message the fleet…", text: self.$draft, axis: .vertical)
-            .textFieldStyle(.plain)
-            .lineLimit(1 ... 12)
-            // Keep the empty field at its intrinsic one-line height inside the
-            // detached VStack. It still grows through the line-limit range, and
-            // Dynamic Type remains free to increase each line's intrinsic height.
-            .fixedSize(horizontal: false, vertical: true)
-            .focused(self.$focused)
-            .onSubmit { self.sendDraft() }
-            .onAppear {
-                self.focused = true
-                self.installDiagnosticDraftIfRequested()
-            }
-            .padding(.vertical, 8)
-        #endif
     }
 
     @ViewBuilder
@@ -1474,6 +1603,17 @@ struct Composer: View, Equatable {
         .disabled(!self.allowsSending)
         .help(self.model.deliverExternally ? "External channel delivery enabled" : "Replies stay in Cast")
         .accessibilityLabel(self.model.deliverExternally ? "External delivery enabled" : "External delivery disabled")
+        self.sendButton
+    }
+    #endif
+
+    #if os(iOS)
+    private static let sendButtonSide: CGFloat = 34
+    #else
+    private static let sendButtonSide: CGFloat = 28
+    #endif
+
+    private var sendButton: some View {
         Button(action: self.sendDraft) {
             ZStack {
                 Circle()
@@ -1482,7 +1622,7 @@ struct Composer: View, Equatable {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(self.sendDisabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.white))
             }
-            .frame(width: 28, height: 28)
+            .frame(width: Self.sendButtonSide, height: Self.sendButtonSide)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -1540,9 +1680,13 @@ struct Composer: View, Equatable {
     private func performSend(deliver: Bool) {
         guard self.dictation.phase == .idle else { return }
         let text = self.draft
+        #if os(iOS)
+        let target = self.store.attachmentDraftTarget
+        #endif
         guard self.store.send(text, deliver: deliver) else { return }
         self.draft = ""
         #if os(iOS)
+        self.imports.clearFailures(for: target)
         self.sendPulse += 1
         // iOS 17+ TextField(axis: .vertical) does not re-render when the binding is
         // cleared while the field is focused — the internal UITextView keeps the sent
@@ -1557,15 +1701,23 @@ struct Composer: View, Equatable {
     }
 
     #if os(iOS)
+    /// Prepares one picker selection as a single tile in the tray. The tile is the source of
+    /// truth for cancellation: once it is gone, nothing from this batch is attached.
     private func importPhotos(_ items: [PhotosPickerItem], target: ChatStore.AttachmentDraftTarget, importID: UUID) async {
         var prepared: [PreparedAttachment] = []
         var failures: [String] = []
         var committed = false
         defer { if !committed { prepared.forEach { $0.removeOwnedFile() } } }
-        self.importingMedia = true
-        defer { if self.mediaImportID == importID { self.importingMedia = false } }
+        /// Attachments already in the destination draft, when it is still the one on screen.
+        /// After a switch the store re-validates the whole batch on delivery instead.
+        func existing() -> [PreparedAttachment] {
+            self.store.attachmentDraftTarget == target ? self.model.pendingAttachments : []
+        }
         for (index, item) in items.enumerated() {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.imports.isPreparing(importID) else { return }
+            if items.count > 1 {
+                self.imports.retitle(importID, "Preparing \(index + 1) of \(items.count)")
+            }
             do {
                 if item.supportedContentTypes.contains(where: { VideoAttachments.isVideo($0) }) {
                     guard let video = try await item.loadTransferable(type: PickedVideoAttachment.self) else {
@@ -1574,7 +1726,7 @@ struct Composer: View, Equatable {
                     prepared.append(video.attachment)
                     do {
                         try Task.checkCancellation()
-                        try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared)
+                        try AttachmentProcessor.validateFrame(message: "", attachments: existing() + prepared)
                     } catch { prepared.removeLast().removeOwnedFile(); throw error }
                     continue
                 }
@@ -1589,17 +1741,46 @@ struct Composer: View, Equatable {
                     try AttachmentProcessor.prepareImage(data: data, fileName: name)
                 }.value
                 guard !Task.isCancelled else { return }
-                try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared + [attachment])
+                try AttachmentProcessor.validateFrame(message: "", attachments: existing() + prepared + [attachment])
                 prepared.append(attachment)
             } catch {
                 guard !Task.isCancelled else { return }
                 failures.append(error.localizedDescription)
             }
         }
-        guard !Task.isCancelled, self.store.attachmentDraftTarget == target else { return }
-        if !prepared.isEmpty { self.store.addAttachments(prepared); committed = true }
+        guard !Task.isCancelled, self.imports.isPreparing(importID) else { return }
+        if !prepared.isEmpty {
+            if self.store.attachmentDraftTarget == target {
+                self.store.addAttachments(prepared)
+            } else {
+                // The operator moved on while these were being prepared. Deliver to the
+                // draft they were picked for; the store validates and owns each one.
+                for attachment in prepared {
+                    self.store.finishAttachmentPreparation(.success(attachment), target: target)
+                }
+            }
+            committed = true
+        }
         if let first = failures.first {
-            self.store.showError(failures.count == 1 ? first : "\(failures.count) selected items could not be attached. \(first)")
+            self.imports.retitle(importID, failures.count == 1 ? "1 item not attached" : "\(failures.count) items not attached")
+            self.imports.fail(importID, message: first)
+        } else {
+            self.imports.finish(importID)
+        }
+    }
+
+    /// Files prepare off the main actor behind a visible, cancellable tile and land in the
+    /// draft that was on screen when the picker opened.
+    private func importFiles(_ urls: [URL], target: ChatStore.AttachmentDraftTarget) {
+        self.imports.clearFailures(for: target)
+        let store = self.store
+        for url in urls {
+            self.imports.enqueue(
+                title: url.lastPathComponent,
+                symbol: "doc",
+                target: target,
+                work: { try await AttachmentProcessor.prepareForSending(url: url) },
+                deliver: { store.finishAttachmentPreparation(.success($0), target: target) })
         }
     }
     #endif
@@ -1641,9 +1822,28 @@ struct Composer: View, Equatable {
 
     #if os(iOS)
     private func importFromUIPasteboard() {
-        for image in UIPasteboard.general.images ?? [] {
-            guard let data = image.pngData() ?? image.jpegData(compressionQuality: 0.9) else { continue }
-            self.store.addAttachment(imageData: data, fileName: "Pasted Image")
+        let target = self.store.attachmentDraftTarget
+        self.imports.clearFailures(for: target)
+        let images = UIPasteboard.general.hasImages ? (UIPasteboard.general.images ?? []) : []
+        guard !images.isEmpty else {
+            // Say so in place; an action that silently does nothing reads as broken.
+            self.imports.report(
+                "The clipboard has no image.", title: "Paste Image", symbol: "doc.on.clipboard", target: target)
+            return
+        }
+        let store = self.store
+        for image in images {
+            self.imports.enqueue(
+                title: "Pasted Image",
+                symbol: "doc.on.clipboard",
+                target: target,
+                work: {
+                    guard let data = image.pngData() ?? image.jpegData(compressionQuality: 0.9) else {
+                        throw AttachmentError.unreadable
+                    }
+                    return try AttachmentProcessor.prepareImage(data: data, fileName: "Pasted Image")
+                },
+                deliver: { store.finishAttachmentPreparation(.success($0), target: target) })
         }
     }
     #endif
@@ -1895,46 +2095,6 @@ struct GlassCapsule: View {
                 .fill(.regularMaterial)
                 .overlay(shape.strokeBorder(.quaternary, lineWidth: 0.5))
         }
-    }
-}
-
-/// Session metadata updates independently of the field editor and streamed transcript.
-private struct ComposerModelIndicator: View {
-    let store: ChatStore
-    @State private var settingsSession: String?
-
-    private var isConnected: Bool {
-        if case .connected = self.store.connectionState { return true }
-        return false
-    }
-
-    var body: some View {
-        let session = self.store.sessions.first { $0.key == self.store.selectedSessionKey }
-        let status = ComposerModelStatus(
-            model: session?.model,
-            isConnected: self.isConnected)
-        Button {
-            self.settingsSession = self.store.selectedSessionKey
-        } label: {
-            HStack(spacing: 5) {
-                Text(status.label)
-                if let key = self.store.selectedSessionKey, self.store.pendingModelChanges[key] != nil {
-                    Text("· next turn").foregroundStyle(.orange)
-                }
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
-        }
-            .buttonStyle(.plain)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel(status.label)
-            .help("Model settings. " + status.help)
-            .sheet(isPresented: Binding(get: { self.settingsSession != nil }, set: { if !$0 { self.settingsSession = nil } })) {
-                if let key = self.settingsSession { SessionModelSettingsView(store: self.store, sessionKey: key) }
-            }
     }
 }
 
