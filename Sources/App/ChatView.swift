@@ -1448,6 +1448,7 @@ struct Composer: View, Equatable {
 
     private var messageField: some View {
         TextField("Message the fleet…", text: self.$draft, axis: .vertical)
+            .accessibilityIdentifier("composer-message-field")
             .textFieldStyle(.plain)
             .lineLimit(1 ... 12)
             // Keep the empty field at its intrinsic one-line height inside the

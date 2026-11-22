@@ -58,10 +58,7 @@ final class IOSPolishUITests: XCTestCase {
     /// The composer's message field. It carries no identifier, so it is found by its
     /// placeholder, which stays attached to the element after text is typed.
     private func composerField(_ app: XCUIApplication) -> XCUIElement {
-        let predicate = NSPredicate(
-            format: "(elementType == %d OR elementType == %d) AND placeholderValue == %@",
-            XCUIElement.ElementType.textView.rawValue, XCUIElement.ElementType.textField.rawValue, self.placeholder)
-        return app.descendants(matching: .any).matching(predicate).firstMatch
+        app.descendants(matching: .any).matching(identifier: "composer-message-field").firstMatch
     }
 
     private func draftText(_ field: XCUIElement) -> String {

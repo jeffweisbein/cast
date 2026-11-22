@@ -155,7 +155,7 @@ struct ResultsLibraryView: View {
                 Button { self.selected = item } label: {
                     ResultCard(item: item, store: self.store,
                                conversation: titles[SessionKeyMatcher.canonical(item.sessionKey)] ?? "Conversation",
-                               isNew: !self.store.reviewedWork.ids.contains(item.reviewID))
+                               isNew: item.isGatewayArtifact && !self.store.reviewedWork.ids.contains(item.reviewID))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("result-library-card-" + item.id)
@@ -195,7 +195,10 @@ struct ResultsLibraryView: View {
         if automatic, let last = self.lastAutomaticSyncAt, Date().timeIntervalSince(last) < 60 { return }
         self.lastAutomaticSyncAt = Date()
         self.syncing = true; defer { self.syncing = false }
-        guard let outcome = await DeliverableSync.run(store: self.store, sessionKey: nil) else { return }
+        guard let outcome = await DeliverableSync.run(store: self.store, sessionKey: nil) else {
+            self.lastAutomaticSyncAt = nil
+            return
+        }
         self.syncError = outcome == .unsupported ? nil : outcome.message
         self.hasSynced = true
     }

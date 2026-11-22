@@ -377,6 +377,10 @@ struct WorkspaceContentView: View {
     /// Deliverables, which are now tabs.
     private var moreMenu: some View {
         Menu {
+            Menu("Workspace", systemImage: "square.stack") {
+                WorkspaceMenuItems(manager: self.manager, showingPairing: self.$showingPairing)
+            }
+            Divider()
             Button("Search", systemImage: "magnifyingglass") { self.showingSearch = true }
             Button("Tasks", systemImage: "checklist") { self.showingTasks = true }
             Button("Activity", systemImage: "waveform.path.ecg") { self.showingActivity = true }
