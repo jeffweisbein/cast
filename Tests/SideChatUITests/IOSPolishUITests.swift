@@ -138,8 +138,7 @@ final class IOSPolishUITests: XCTestCase {
     }
 
     /// On a phone the tab bar sits under the software keyboard, so reaching a tab from a
-    /// chat means putting the keyboard away first, the way a reader does: drag the
-    /// transcript down into it.
+    /// chat means putting the keyboard away through the production Chat actions menu.
     private func dismissKeyboard(_ app: XCUIApplication) {
         let keyboard = app.keyboards.firstMatch
         guard keyboard.exists else { return }
@@ -187,8 +186,9 @@ final class IOSPolishUITests: XCTestCase {
             app.buttons["Workspace"].tap()
             XCTAssertTrue(app.buttons["Pair workspace…"].waitForExistence(timeout: 5),
                           "Workspace actions must remain reachable from More")
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.90)).tap()
             XCTAssertTrue(self.gone(app.buttons["Pair workspace…"]))
+            XCTAssertTrue(more.waitForExistence(timeout: 5), app.debugDescription)
         }
 
         // The operator's pinned order holds in the list…
@@ -254,13 +254,15 @@ final class IOSPolishUITests: XCTestCase {
         self.attach(app, "polish-tabs-visible-in-chat")
 
         for destination in ["Results", "Needs You"] {
+            // Returning to Chats restores the editor focus as well as its draft.
+            self.dismissKeyboard(app)
             self.tab(app, destination).tap()
             let landmark = destination == "Results" ? app.buttons["results-filter-all"] : app.buttons["Open chat"].firstMatch
             XCTAssertTrue(landmark.waitForExistence(timeout: 8), "\(destination) must open\n" + app.debugDescription)
             XCTAssertEqual(app.staticTexts["fixture-selected-chat"].label, self.cast,
                            "Visiting \(destination) must not deselect the open conversation")
 
-            let chats = app.tabBars.buttons["Chats"]
+            let chats = self.tab(app, "Chats")
             XCTAssertTrue(chats.waitForExistence(timeout: 5), app.debugDescription)
             chats.tap()
             self.waitForSelection(app, self.cast, "Returning from \(destination) must keep the same conversation")

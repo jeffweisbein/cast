@@ -120,6 +120,9 @@ final class ResultsDesignUITests: XCTestCase {
         attach(app, "inspector-side-chat-replaces-result")
 
         press(row(app, cast))
+        #if os(iOS)
+        press(app.buttons["chat-actions-menu"])
+        #endif
         let toggle = app.buttons["result-review-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
         press(toggle)

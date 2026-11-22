@@ -230,9 +230,9 @@ final class SessionModelReasoningPreservationTests: XCTestCase {
         XCTAssertTrue(SessionModelMutation.needsThinkingCommand(effort: "low", currentOverride: "high"))
     }
 
-    func testInitialEffortTrimsButNeverInvents() {
+    func testInitialEffortPreservesRawOverrideWithoutInventing() {
         XCTAssertEqual(SessionModelSheetState.initialEffort(override: nil), "")
-        XCTAssertEqual(SessionModelSheetState.initialEffort(override: " high "), "high")
+        XCTAssertEqual(SessionModelSheetState.initialEffort(override: " high "), " high ")
     }
 }
 
