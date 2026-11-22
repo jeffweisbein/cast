@@ -106,7 +106,9 @@ struct ResultsLibraryView: View {
             HStack {
                 Label(syncError, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary)
                 Spacer()
-                Button("Retry") { Task { await self.sync() } }.font(.footnote).buttonStyle(.borderless)
+                Button { Task { await self.sync() } } label: {
+                    Text("Retry").frame(minWidth: 44, minHeight: 44)
+                }.font(.footnote).buttonStyle(.borderless)
             }
         }
     }

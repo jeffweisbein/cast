@@ -490,7 +490,9 @@ struct ChatDetailPlaceholder: View {
                 .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .frame(maxWidth: 360)
             }
-            Button("New chat", systemImage: "square.and.pencil") { self.store.newPersonalChatPresented = true }
+            Button { self.store.newPersonalChatPresented = true } label: {
+                Label("New chat", systemImage: "square.and.pencil").frame(minWidth: 44, minHeight: 44)
+            }
                 .buttonStyle(.bordered)
         }
         .padding(24)

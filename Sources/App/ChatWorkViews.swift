@@ -162,7 +162,7 @@ struct ChatFilterBar: View {
             .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: Capsule())
             .overlay(Capsule().strokeBorder(.quaternary, lineWidth: selected ? 0 : 1))
             #if os(iOS)
-            .frame(minHeight: 44)
+            .frame(minWidth: 44, minHeight: 44)
             #endif
             .contentShape(Rectangle())
         }

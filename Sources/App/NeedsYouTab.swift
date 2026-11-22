@@ -11,15 +11,21 @@ struct NeedsYouTab: View {
     @State private var showingQuestions = false
     @State private var showingHistory = false
     @State private var refreshing = false
+    @State private var lastAutomaticRefreshAt: Date?
 
     private var isConnected: Bool { if case .connected = self.store.connectionState { return true }; return false }
 
-    private func refresh() async {
-        guard !self.refreshing, self.isConnected else { return }
+    private func refresh(automatic: Bool = false) async {
+        guard !self.refreshing else { return }
+        guard self.isConnected else { self.lastAutomaticRefreshAt = nil; return }
+        if automatic, let last = self.lastAutomaticRefreshAt, Date().timeIntervalSince(last) < 60 { return }
         self.refreshing = true; defer { self.refreshing = false }
         await self.store.refreshSessions()
+        guard !Task.isCancelled else { return }
         await self.store.refreshApprovals()
+        guard !Task.isCancelled else { return }
         await self.store.refreshQuestions()
+        if !Task.isCancelled { self.lastAutomaticRefreshAt = Date() }
     }
 
     var body: some View {
@@ -61,7 +67,7 @@ struct NeedsYouTab: View {
                 .animation(nil, value: items.map(\.id))
             }
             .navigationTitle("Needs You")
-            .task { await self.refresh() }
+            .task(id: self.isConnected) { await self.refresh(automatic: true) }
             .refreshable { await self.refresh() }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -102,12 +108,18 @@ struct NeedsYouTab: View {
                 Text(item.detail).font(.callout).foregroundStyle(.secondary)
                 HStack {
                     if let key = item.sessionKey {
-                        Button("Open chat") { self.openConversation(key) }
-                        Button("Details") { self.detailItem = item }
+                        Button { self.openConversation(key) } label: {
+                            Text("Open chat").frame(minWidth: 44, minHeight: 44)
+                        }
+                        Button { self.detailItem = item } label: {
+                            Text("Details").frame(minWidth: 44, minHeight: 44)
+                        }
                     }
                     if item.kind == .failure,
                        let session = self.store.sessions.first(where: { $0.key == item.sessionKey }) {
-                        Button("Dismiss failure") { self.store.acknowledgeFailure(session) }
+                        Button { self.store.acknowledgeFailure(session) } label: {
+                            Text("Dismiss failure").frame(minWidth: 44, minHeight: 44)
+                        }
                     }
                 }
                 .buttonStyle(.bordered)
@@ -118,7 +130,9 @@ struct NeedsYouTab: View {
 
     @ViewBuilder private func openChatButton(_ item: AttentionItem) -> some View {
         if let key = item.sessionKey {
-            Button("Open chat", systemImage: "bubble.left") { self.openConversation(key) }
+            Button { self.openConversation(key) } label: {
+                Label("Open chat", systemImage: "bubble.left").frame(minWidth: 44, minHeight: 44)
+            }
                 .buttonStyle(.borderless)
                 .font(.callout)
         }
