@@ -130,28 +130,33 @@ private struct PinnedSwitcherPresenter: ViewModifier {
 struct ChatsBottomControls: View {
     let store: ChatStore
     @State private var showingSwitcher = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         let hasPinned = self.store.personalChats.contains { self.store.isSessionPinned($0.key) }
-        HStack(spacing: 12) {
+        let accessibilityLayout = self.dynamicTypeSize.isAccessibilitySize
+        let layout = accessibilityLayout ? AnyLayout(VStackLayout(spacing: 6)) : AnyLayout(HStackLayout(spacing: 12))
+        layout {
             if hasPinned {
                 Button { self.showingSwitcher = true } label: {
                     Label("Pinned", systemImage: "pin")
                         .font(.body.weight(.medium))
+                        .lineLimit(1)
                         .padding(.horizontal, 4)
-                        .frame(minHeight: 44)
+                        .frame(maxWidth: accessibilityLayout ? .infinity : nil, minHeight: 44)
                 }
                 .buttonStyle(.glass)
                 .accessibilityLabel("Switch pinned chat")
                 .accessibilityIdentifier("pinned-switcher")
                 .modifier(PinnedSwitcherPresenter(store: self.store, isPresented: self.$showingSwitcher, arrowEdge: .bottom))
             }
-            Spacer(minLength: 0)
+            if !accessibilityLayout { Spacer(minLength: 0) }
             Button { self.store.newPersonalChatPresented = true } label: {
                 Label("New chat", systemImage: "square.and.pencil")
                     .font(.body.weight(.semibold))
+                    .lineLimit(1)
                     .padding(.horizontal, 4)
-                    .frame(minHeight: 44)
+                    .frame(maxWidth: accessibilityLayout ? .infinity : nil, minHeight: 44)
             }
             .buttonStyle(.glassProminent)
             .keyboardShortcut("n", modifiers: .command)
