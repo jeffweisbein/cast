@@ -679,6 +679,28 @@ struct ChatView: View {
     var body: some View {
         self.transcriptAndComposer
         .toolbar {
+            #if os(iOS)
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if store.sideChat != nil {
+                        Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
+                    }
+                    Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true }
+                    Button("Secure entry", systemImage: "key") { showingSecretRequests = true }
+                    Divider()
+                    Button("Library", systemImage: "photo.on.rectangle.angled") { showingLibrary = true }
+                    Button("Result", systemImage: "doc.text.magnifyingglass") {
+                        store.presentResultReview(!store.isResultReviewPresented)
+                    }
+                    .accessibilityIdentifier("result-review-toggle")
+                    Toggle("Show agent's work", isOn: self.$showAgentWork)
+                } label: {
+                    Label("Chat actions", systemImage: "ellipsis")
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityIdentifier("chat-actions-menu")
+            }
+            #else
             ToolbarItem {
                 if store.sideChat != nil {
                     Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
@@ -686,6 +708,7 @@ struct ChatView: View {
             }
             ToolbarItem { Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true } }
             ToolbarItem { Button("Secure entry", systemImage: "key") { showingSecretRequests = true } }
+            #endif
         }
         .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
         .sheet(isPresented: $showingSecretRequests) { SecretRequestsView(store: store) }
@@ -748,6 +771,7 @@ struct ChatView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Menu {
@@ -777,6 +801,7 @@ struct ChatView: View {
                 .accessibilityIdentifier("result-review-toggle")
             }
         }
+        #endif
         .sheet(isPresented: self.$showingLibrary) {
             LibraryView(store: self.store)
         }
