@@ -139,7 +139,7 @@ struct ChatsBottomControls: View {
                     Label("Pinned", systemImage: "pin")
                         .font(.body.weight(.medium))
                         .padding(.horizontal, 4)
-                        .frame(minHeight: 36)
+                        .frame(minHeight: 44)
                 }
                 .buttonStyle(.glass)
                 .accessibilityLabel("Switch pinned chat")
@@ -151,7 +151,7 @@ struct ChatsBottomControls: View {
                 Label("New chat", systemImage: "square.and.pencil")
                     .font(.body.weight(.semibold))
                     .padding(.horizontal, 4)
-                    .frame(minHeight: 36)
+                    .frame(minHeight: 44)
             }
             .buttonStyle(.glassProminent)
             .keyboardShortcut("n", modifiers: .command)

@@ -312,8 +312,8 @@ struct WorkspaceContentView: View {
             if self.store.selectedSessionKey != nil {
                 #if os(iOS)
                 ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.sideChatPresentation)
-                    // iPhone: the composer owns the bottom edge inside a chat; tabs return with Back.
-                    .toolbar(self.horizontalSizeClass == .compact ? .hidden : .automatic, for: .tabBar)
+                    // Keep primary destinations reachable without backing out of this chat.
+                    // Tab switching leaves the selected conversation and its draft intact.
                     .toolbar {
                         if self.horizontalSizeClass == .compact,
                            self.store.personalChats.contains(where: { self.store.isSessionPinned($0.key) }) {

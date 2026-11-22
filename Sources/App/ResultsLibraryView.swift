@@ -14,6 +14,7 @@ struct ResultsLibraryView: View {
     @State private var hasSynced = false
     @State private var syncError: String?
     @State private var selected: Deliverable?
+    @State private var lastAutomaticSyncAt: Date?
 
     private var isConnected: Bool { if case .connected = self.store.connectionState { return true }; return false }
 
@@ -66,7 +67,7 @@ struct ResultsLibraryView: View {
             .searchable(text: self.$query, prompt: "Search results")
             .refreshable { await self.sync() }
             // Re-runs on reconnect so an offline launch does not stay stale.
-            .task(id: self.isConnected) { await self.sync() }
+            .task(id: self.isConnected) { await self.sync(automatic: true) }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     if self.syncing {
@@ -182,10 +183,18 @@ struct ResultsLibraryView: View {
         return titles
     }
 
-    private func sync() async {
+    private func sync(automatic: Bool = false) async {
         guard !self.syncing else { return }
+        guard self.isConnected else {
+            self.hasSynced = true
+            self.lastAutomaticSyncAt = nil
+            return
+        }
+        // Re-entering a tab should not refetch every conversation. Manual refresh and
+        // a reconnect remain immediate, while appearance refreshes are bounded.
+        if automatic, let last = self.lastAutomaticSyncAt, Date().timeIntervalSince(last) < 60 { return }
+        self.lastAutomaticSyncAt = Date()
         self.syncing = true; defer { self.syncing = false }
-        guard self.isConnected else { self.hasSynced = true; return }
         guard let outcome = await DeliverableSync.run(store: self.store, sessionKey: nil) else { return }
         self.syncError = outcome == .unsupported ? nil : outcome.message
         self.hasSynced = true
