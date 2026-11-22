@@ -108,10 +108,11 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #endif
     private var usesShortLayout: Bool {
         #if os(iOS)
-        verticalSizeClass == .compact
+        verticalSizeClass == .compact || (dynamicTypeSize.isAccessibilitySize && composerFocused)
         #else
         false
         #endif
