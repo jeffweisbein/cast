@@ -142,11 +142,15 @@ final class IOSPolishUITests: XCTestCase {
     private func dismissKeyboard(_ app: XCUIApplication) {
         let keyboard = app.keyboards.firstMatch
         guard keyboard.exists else { return }
-        let hide = app.buttons["Hide keyboard"].firstMatch
-        if hide.exists, hide.isHittable { hide.tap() } else {
+        func hittableHideButton() -> XCUIElement? {
+            app.buttons.matching(identifier: "Hide keyboard").allElementsBoundByIndex.first { $0.isHittable }
+        }
+        if let hide = hittableHideButton() { hide.tap() } else {
             app.buttons["chat-actions-menu"].tap()
-            XCTAssertTrue(app.buttons["Hide keyboard"].firstMatch.waitForExistence(timeout: 5))
-            app.buttons["Hide keyboard"].firstMatch.tap()
+            let available = NSPredicate { _, _ in hittableHideButton() != nil }
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: available, object: app)], timeout: 5), .completed)
+            guard let hide = hittableHideButton() else { return }
+            hide.tap()
         }
         XCTAssertTrue(self.gone(keyboard), "The keyboard must dismiss through the production Hide keyboard action")
     }
@@ -498,6 +502,12 @@ final class IOSPolishUITests: XCTestCase {
 
             let add = app.buttons["composer-add-menu"]
             XCTAssertTrue(add.waitForExistence(timeout: 5), app.debugDescription)
+            if app.keyboards.firstMatch.exists {
+                let assistant = app.otherElements["SystemInputAssistantView"].firstMatch
+                let keyboardTop = assistant.exists ? min(assistant.frame.minY, app.keyboards.firstMatch.frame.minY) : app.keyboards.firstMatch.frame.minY
+                XCTAssertLessThanOrEqual(add.frame.maxY, keyboardTop + 1, "Composer controls must stay above the keyboard at every text size")
+                XCTAssertTrue(add.isHittable, "The add control must remain reachable")
+            }
             add.tap()
             let photos = app.buttons["Photos & Videos"]
             XCTAssertTrue(photos.waitForExistence(timeout: 5), app.debugDescription)
