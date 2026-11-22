@@ -139,6 +139,15 @@ struct WorkspaceContentView: View {
     @State private var showingStatus = false
     @State private var showingSearch = false
     @State private var showingTasks = false
+    #if os(iOS)
+    /// Always launches on Chats: the user's own list is the landing, never a greeting.
+    @State private var tab: CastTab = .chats
+    @State private var showingUnreadInbox = false
+    /// Re-evaluates time-bound attention (question/approval expiry) for the tab badge.
+    @State private var badgeClock = Date()
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+    #if os(macOS)
     @AppStorage("sidebar.tools.expanded") private var toolsExpanded = false
 
     private var workspaceTools: some View {
@@ -198,6 +207,7 @@ struct WorkspaceContentView: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 4)
     }
+    #endif
 
     private var showsComposer: Bool {
         #if os(macOS) && DEBUG
@@ -208,20 +218,58 @@ struct WorkspaceContentView: View {
     }
 
     var body: some View {
+        #if os(iOS)
+        let needsYouCount = CastNavigationCounts.needsYou(self.store.workAttentionItems(at: max(self.badgeClock, Date())))
+        let resultsCount = CastNavigationCounts.results(self.store.resultArtifactCounts)
+        TabView(selection: self.$tab) {
+            Tab(CastTab.chats.title, systemImage: CastTab.chats.systemImage, value: CastTab.chats) {
+                self.chatsSplitView
+            }
+            Tab(CastTab.needsYou.title, systemImage: CastTab.needsYou.systemImage, value: CastTab.needsYou) {
+                NeedsYouTab(store: self.store, openConversation: self.openConversation, showResults: { self.tab = .results })
+            }
+            .badge(needsYouCount)
+            Tab(CastTab.results.title, systemImage: CastTab.results.systemImage, value: CastTab.results) {
+                ResultsLibraryView(store: self.store, openConversation: self.openConversation)
+            }
+            .badge(resultsCount)
+        }
+        // Any conversation request (Results, Needs You, notification routes) lands in Chats;
+        // the split view below pushes the chat in the same update.
+        .onChange(of: self.store.detailNavigationRequest) { _, _ in
+            if self.tab != .chats { self.tab = .chats }
+        }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                self.badgeClock = Date()
+            }
+        }
+        .modifier(self.sheets)
+        #else
+        self.chatsSplitView
+            .modifier(self.sheets)
+        #endif
+    }
+
+    #if os(iOS)
+    private func openConversation(_ key: String) {
+        self.tab = .chats
+        self.store.selectFromSidebar(key)
+    }
+    #endif
+
+    private var chatsSplitView: some View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             Group {
                 #if os(iOS)
                 SessionListView(store: self.store,
                     showActivity: { self.showingActivity = true },
-                    showNeedsYou: { self.showingNeedsYou = true }) {
-                        WorkspaceSwitcher(manager: self.manager, showingPairing: self.$showingPairing)
-                        Divider()
-                        self.workspaceTools
-                        Divider()
+                    showNeedsYou: { self.tab = .needsYou }) {
+                        EmptyView()
                     } navigationFooter: {
-                        ConnectionStatusView(store: store)
-                        Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
-                            .buttonStyle(.plain).padding(10)
+                        // Healthy connections stay quiet; problems and unconfirmed sends surface here.
+                        ConnectionStatusView(store: store, showsWhenHealthy: false)
                     }
                 #else
                 VStack(spacing: 0) {
@@ -236,33 +284,54 @@ struct WorkspaceContentView: View {
                 }
                 #endif
             }
-            .navigationTitle("Cast")
                 #if os(iOS)
-                // Compact iPhone collapses the split view, and `.automatic` items are then
-                // hosted by the visible column's own bar — a toolbar declared on the split
-                // view itself lands nowhere at all, which is why iOS had no bell and no New
-                // Chat. Kept to two items so the iPhone bar does not crowd the title.
+                // One title, one place for workspace choice: the title menu replaces the old
+                // workspace row + "Tools" disclosure + second "Chats" header.
+                .navigationTitle(CastTab.chats.title)
+                .navigationSubtitle(self.manager.selectedStore.profile.name)
+                .toolbarTitleMenu { WorkspaceMenuItems(manager: self.manager, showingPairing: self.$showingPairing) }
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            self.showingNotificationCenter = true
-                        } label: {
-                            Label("Notification Center", systemImage: "bell")
+                    if self.manager.unreadSessionCount > 0 {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            AggregateUnreadButton(count: self.manager.unreadSessionCount) {
+                                self.showingUnreadInbox = true
+                            }
                         }
                     }
+                    ToolbarItem(placement: .topBarTrailing) { self.moreMenu }
                 }
-                #endif
-                #if os(macOS)
+                .sheet(isPresented: self.$showingUnreadInbox) {
+                    UnreadInboxView(manager: self.manager, isPresented: self.$showingUnreadInbox)
+                }
+                .background { self.keyboardShortcuts }
+                #else
+                .navigationTitle("Cast")
                 .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 380)
                 #endif
         } detail: {
             if self.store.selectedSessionKey != nil {
+                #if os(iOS)
                 ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.sideChatPresentation)
+                    // iPhone: the composer owns the bottom edge inside a chat; tabs return with Back.
+                    .toolbar(self.horizontalSizeClass == .compact ? .hidden : .automatic, for: .tabBar)
+                    .toolbar {
+                        if self.horizontalSizeClass == .compact,
+                           self.store.personalChats.contains(where: { self.store.isSessionPinned($0.key) }) {
+                            ToolbarItem(placement: .topBarLeading) { PinnedSwitcherToolbarButton(store: self.store) }
+                        }
+                    }
+                #else
+                ChatView(store: self.store, showsComposer: self.showsComposer, showingSideChat: self.sideChatPresentation)
+                #endif
             } else {
+                #if os(iOS)
+                ChatDetailPlaceholder(store: self.store)
+                #else
                 ContentUnavailableView(
                     "Pick a conversation",
                     systemImage: "bubble.left.and.bubble.right",
                     description: Text("Create a chat or keep an existing conversation from Manage Chats."))
+                #endif
             }
         }
         .onChange(of: store.detailNavigationRequest) { _, _ in
@@ -301,20 +370,152 @@ struct WorkspaceContentView: View {
 
         }
         #endif
-        .sheet(isPresented: $showingDownloads) { DeliverablesView(store: store, startsWithDownloads: true) }
-        .sheet(isPresented: $showingSearch) { OperationsSearchView(store: store) }
-        .sheet(isPresented: $showingTasks) { TasksView(store: store) }
-        .sheet(isPresented: self.$showingNeedsYou) { NeedsYouView(store: self.store) }
-        .sheet(isPresented: self.$showingStatus) { CastStatusView(store: self.store) }
-        .sheet(isPresented: self.$showingDeliverables) { DeliverablesView(store: self.store) }
-        .sheet(isPresented: self.$showingNotificationCenter) {
-            OperationsNotificationCenterView(store: self.store)
+    }
+
+    #if os(iOS)
+    /// Everything that used to live in the sidebar "Tools" disclosure, minus Needs You and
+    /// Deliverables, which are now tabs.
+    private var moreMenu: some View {
+        Menu {
+            Button("Search", systemImage: "magnifyingglass") { self.showingSearch = true }
+            Button("Tasks", systemImage: "checklist") { self.showingTasks = true }
+            Button("Activity", systemImage: "waveform.path.ecg") { self.showingActivity = true }
+            Button(self.store.downloads.activeCount > 0 ? "Downloads (\(self.store.downloads.activeCount))" : "Downloads",
+                   systemImage: "arrow.down.circle") { self.showingDownloads = true }
+            Button("All files & links", systemImage: "tray.full") { self.showingDeliverables = true }
+            Divider()
+            let failed = self.store.notificationRecords.lazy.filter { $0.state == .failed }.count
+            Button(failed > 0 ? "Notification Center (\(failed) failed)" : "Notification Center", systemImage: "bell") {
+                self.showingNotificationCenter = true
+            }
+            Button("Status & updates", systemImage: "info.circle") { self.showingStatus = true }
+        } label: {
+            Label("More", systemImage: "ellipsis")
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }
-        .sheet(isPresented: self.$showingActivity) {
-            AutomationRunsView(store: self.store)
+        .accessibilityIdentifier("chats-more-menu")
+    }
+
+    /// Hardware-keyboard shortcuts for items that moved into the More menu.
+    private var keyboardShortcuts: some View {
+        Group {
+            Button("Search") { self.showingSearch = true }.keyboardShortcut("k", modifiers: .command)
+            Button("Chats") { self.tab = .chats }.keyboardShortcut("1", modifiers: .command)
+            Button("Needs You") { self.tab = .needsYou }.keyboardShortcut("2", modifiers: .command)
+            Button("Results") { self.tab = .results }.keyboardShortcut("3", modifiers: .command)
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+    #endif
+
+    private var sheets: WorkspaceSheets {
+        WorkspaceSheets(
+            store: self.store,
+            showingDownloads: self.$showingDownloads,
+            showingSearch: self.$showingSearch,
+            showingTasks: self.$showingTasks,
+            showingNeedsYou: self.$showingNeedsYou,
+            showingStatus: self.$showingStatus,
+            showingDeliverables: self.$showingDeliverables,
+            showingNotificationCenter: self.$showingNotificationCenter,
+            showingActivity: self.$showingActivity)
+    }
+}
+
+/// Every secondary screen stays one sheet away on both platforms.
+private struct WorkspaceSheets: ViewModifier {
+    let store: ChatStore
+    @Binding var showingDownloads: Bool
+    @Binding var showingSearch: Bool
+    @Binding var showingTasks: Bool
+    @Binding var showingNeedsYou: Bool
+    @Binding var showingStatus: Bool
+    @Binding var showingDeliverables: Bool
+    @Binding var showingNotificationCenter: Bool
+    @Binding var showingActivity: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $showingDownloads) { DeliverablesView(store: store, startsWithDownloads: true) }
+            .sheet(isPresented: $showingSearch) { OperationsSearchView(store: store) }
+            .sheet(isPresented: $showingTasks) { TasksView(store: store) }
+            .sheet(isPresented: $showingNeedsYou) { NeedsYouView(store: store) }
+            .sheet(isPresented: $showingStatus) { CastStatusView(store: store) }
+            .sheet(isPresented: $showingDeliverables) { DeliverablesView(store: store) }
+            .sheet(isPresented: $showingNotificationCenter) { OperationsNotificationCenterView(store: store) }
+            .sheet(isPresented: $showingActivity) { AutomationRunsView(store: store) }
+    }
+}
+
+#if os(iOS)
+/// Regular-width empty detail (iPad, large landscape phones): quiet pinned shortcuts and New
+/// chat instead of an empty greeting. Opening a chat stays an explicit tap, so read state is
+/// never changed just by launching.
+struct ChatDetailPlaceholder: View {
+    let store: ChatStore
+
+    var body: some View {
+        let pinned = self.store.personalChats.filter { self.store.isSessionPinned($0.key) }.prefix(6)
+        VStack(spacing: 18) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text("Choose a chat").font(.title3.weight(.semibold))
+            if !pinned.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(pinned)) { row in
+                        Button { self.store.selectFromSidebar(row.key) } label: {
+                            HStack {
+                                Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary)
+                                Text(self.store.chatTitle(row)).lineLimit(1)
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if row.key != pinned.last?.key { Divider().padding(.leading, 14) }
+                    }
+                }
+                .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .frame(maxWidth: 360)
+            }
+            Button("New chat", systemImage: "square.and.pencil") { self.store.newPersonalChatPresented = true }
+                .buttonStyle(.bordered)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Workspace choice, pairing, setup and diagnostics, shown from the Chats title menu.
+private struct WorkspaceMenuItems: View {
+    @ObservedObject var manager: WorkspaceManager
+    @Binding var showingPairing: Bool
+
+    var body: some View {
+        ForEach(self.manager.profiles) { profile in
+            Button {
+                self.manager.select(profile.id)
+            } label: {
+                Label(profile.name, systemImage: profile.id == self.manager.selectedWorkspaceID ? "checkmark.circle.fill" : "circle")
+            }
+        }
+        Divider()
+        Button("Pair workspace…", systemImage: "qrcode.viewfinder") { self.showingPairing = true }
+        Button("Cast setup & privacy…", systemImage: "questionmark.circle") { self.manager.presentOnboarding() }
+        ShareLink(item: CastLifecycleDiagnostics.diagnosticsExportURL(), preview: SharePreview("Cast Diagnostics")) {
+            Label("Export diagnostics…", systemImage: "square.and.arrow.up")
         }
     }
 }
+#endif
 
 struct WorkspaceSwitcher: View {
     @ObservedObject var manager: WorkspaceManager

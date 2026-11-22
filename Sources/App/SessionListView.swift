@@ -97,6 +97,11 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
             .listStyle(.sidebar)
             .contentMargins(.top, shortHeight ? 0 : nil, for: .scrollContent)
             .scrollDismissesKeyboard(.interactively)
+            // Thumb-zone actions: pinned switcher + New chat. Dropped while the keyboard
+            // leaves too little height, so rows always keep the scroll space.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !shortHeight { ChatsBottomControls(store: store) }
+            }
             .refreshable { await store.refreshSessions(); await store.refreshSideChats(); await store.syncChatSidebar() }
         }
         #else
@@ -114,6 +119,7 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
 
     private func chatControls(compact: Bool, states: [String: ChatWorkState]) -> some View {
         VStack(spacing: 0) {
+            #if os(macOS)
             if !compact {
                 HStack {
                     Text("Chats").font(.headline)
@@ -121,13 +127,21 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
                     newChatButton
                 }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
             }
+            #endif
+            // iOS: the navigation bar already says "Chats" and New chat lives in the bottom
+            // controls, so the list starts directly with search.
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search chats", text: $query).textFieldStyle(.plain)
                     .accessibilityIdentifier("personal-chat-search")
+                // Short heights (landscape phone, keyboard up) drop the bottom controls, so
+                // New chat stays reachable inline instead.
                 if compact { newChatButton }
             }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 12).padding(.bottom, 8)
+                #if os(iOS)
+                .padding(.top, compact ? 0 : 4)
+                #endif
             // Counts follow the search text so a chip never promises rows the list hides.
             let searchedKeys = Set(rows.map { SessionKeyMatcher.canonical($0.key) })
             let counts = filterCounts(states.filter { searchedKeys.contains($0.key) })
@@ -139,7 +153,11 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
 
     private var newChatButton: some View {
         Button { store.newPersonalChatPresented = true } label: {
+            #if os(iOS)
+            Image(systemName: "square.and.pencil").frame(width: 44, height: 44).contentShape(Rectangle())
+            #else
             Image(systemName: "square.and.pencil").frame(width: 28, height: 28)
+            #endif
         }
         .buttonStyle(.plain).help("New chat")
         .accessibilityLabel("New chat").accessibilityIdentifier("personal-new-chat")

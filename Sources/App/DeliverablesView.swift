@@ -79,19 +79,43 @@ struct DeliverablesView: View {
     }
     private func sync() async {
         guard !syncing else { return }; syncing = true; defer { syncing = false }
-        guard store.gatewayMethods.contains("artifacts.list") else { syncError = "This gateway does not expose downloadable attachments. Existing file links are still shown."; return }
-        var keys = sessionKey.map { [$0] } ?? ([store.selectedSessionKey].compactMap { $0 } + store.sessions.prefix(12).map(\.key))
+        guard let outcome = await DeliverableSync.run(store: store, sessionKey: sessionKey) else { return }
+        syncError = outcome.message
+    }
+
+}
+
+/// One refresh path for the Deliverables sheet and the Results library: the selected chat plus
+/// up to 12 recent conversations, each through its own authorized `artifacts.list` call.
+enum DeliverableSync {
+    enum Outcome: Equatable {
+        case refreshed, unsupported, partialFailure
+        var message: String? {
+            switch self {
+            case .refreshed: return nil
+            case .unsupported: return "This gateway does not expose downloadable attachments. Existing file links are still shown."
+            case .partialFailure: return "Some attachments could not be refreshed. Check the connection and try again."
+            }
+        }
+    }
+
+    static let recentConversationLimit = 12
+
+    /// Returns nil when cancelled, so a dismissed screen never reports a stale failure.
+    @MainActor static func run(store: ChatStore, sessionKey: String?) async -> Outcome? {
+        guard store.gatewayMethods.contains("artifacts.list") else { return .unsupported }
+        var keys = sessionKey.map { [$0] }
+            ?? ([store.selectedSessionKey].compactMap { $0 } + store.sessions.prefix(Self.recentConversationLimit).map(\.key))
         var seen = Set<String>(); keys = keys.filter { seen.insert($0).inserted }
         var failures = 0
         for key in keys {
-            if Task.isCancelled { return }
+            if Task.isCancelled { return nil }
             do { try await store.refreshArtifacts(sessionKey: key) }
-            catch is CancellationError { return }
+            catch is CancellationError { return nil }
             catch { failures += 1 }
         }
-        syncError = failures == 0 ? nil : "Some attachments could not be refreshed. Check the connection and try again."
+        return failures == 0 ? .refreshed : .partialFailure
     }
-
 }
 
 struct DeliverableRow: View {
@@ -109,7 +133,13 @@ struct DeliverableRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(self.item.title).font(.headline).textSelection(.enabled)
+            Label {
+                Text(self.item.title).font(.headline).textSelection(.enabled)
+            } icon: {
+                Image(systemName: ResultsLibrary.systemImage(for: self.item))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
             HStack {
                 Text(self.item.kind)
                 if let ms = self.item.sharedAt {
