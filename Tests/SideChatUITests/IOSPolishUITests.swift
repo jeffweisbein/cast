@@ -145,10 +145,11 @@ final class IOSPolishUITests: XCTestCase {
         guard keyboard.exists else { return }
         let hide = app.buttons["Hide keyboard"]
         if hide.exists, hide.isHittable { hide.tap() } else {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-                .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+            app.buttons["chat-actions-menu"].tap()
+            XCTAssertTrue(app.buttons["Hide keyboard"].waitForExistence(timeout: 5))
+            app.buttons["Hide keyboard"].tap()
         }
-        XCTAssertTrue(self.gone(keyboard), "The keyboard must be dismissible by dragging the transcript down")
+        XCTAssertTrue(self.gone(keyboard), "The keyboard must dismiss through the production Hide keyboard action")
     }
 
     // MARK: - Tabs, pinned order, switching and drafts
@@ -170,10 +171,25 @@ final class IOSPolishUITests: XCTestCase {
         self.assertTallEnough([
             ("Pinned switcher", app.buttons["pinned-switcher"]),
             ("New chat", app.buttons["personal-new-chat"].firstMatch),
-            ("More menu", self.any(app, "chats-more-menu")),
             ("All chats filter", app.buttons["chat-filter-all"]),
             ("Working filter", app.buttons["chat-filter-working"]),
         ], "polish-target-sizes-chats")
+
+        // UIKit reports the toolbar glyph's 36pt visual frame separately from its native
+        // hit region. Prove a 44pt vertical target with delivered taps on both outer edges.
+        let more = self.any(app, "chats-more-menu")
+        self.record(self.frames([("Native More glyph", more)]), "polish-native-toolbar-frame")
+        for offset in [-21.0, 21.0] {
+            more.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .withOffset(CGVector(dx: 0, dy: offset)).tap()
+            XCTAssertTrue(app.buttons["Workspace"].waitForExistence(timeout: 5),
+                          "Native toolbar target must receive a tap within its 44pt hit region")
+            app.buttons["Workspace"].tap()
+            XCTAssertTrue(app.buttons["Pair workspace…"].waitForExistence(timeout: 5),
+                          "Workspace actions must remain reachable from More")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+            XCTAssertTrue(self.gone(app.buttons["Pair workspace…"]))
+        }
 
         // The operator's pinned order holds in the list…
         let order = [self.cast, self.cackles, self.runpr, self.general]

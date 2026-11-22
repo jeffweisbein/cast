@@ -693,6 +693,7 @@ struct ChatView: View {
             #if os(iOS)
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button("Hide keyboard", systemImage: "keyboard.chevron.compact.down") { self.composerFocused = false }
                     if store.sideChat != nil {
                         Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
                     }
