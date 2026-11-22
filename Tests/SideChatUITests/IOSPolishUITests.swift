@@ -35,7 +35,7 @@ final class IOSPolishUITests: XCTestCase {
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {
-        let shot = XCTAttachment(screenshot: app.screenshot())
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name
         shot.lifetime = .keepAlways
         add(shot)
@@ -55,8 +55,7 @@ final class IOSPolishUITests: XCTestCase {
         return inBar.exists ? inBar : app.buttons[title].firstMatch
     }
 
-    /// The composer's message field. It carries no identifier, so it is found by its
-    /// placeholder, which stays attached to the element after text is typed.
+    /// A stable identity is required: UIKit omits the placeholder once the field has text.
     private func composerField(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "composer-message-field").firstMatch
     }

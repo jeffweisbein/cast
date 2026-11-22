@@ -103,7 +103,8 @@ struct SessionModelSheetState: Equatable {
     /// lists is kept. The override already in force is kept when the destination does not
     /// report levels at all (support unknown, so nothing is reset). Only a destination that
     /// lists levels without it returns to the default, and the sheet says so.
-    static func effortAfterSelecting(_ model: GatewayModelChoice?, currentEffort: String, override: String?) -> String {
+    static func effortAfterSelecting(_ model: GatewayModelChoice?, currentEffort: String, override: String?, currentModelReference: String? = nil) -> String {
+        if let model, model.reference == currentModelReference { return override ?? "" }
         guard !currentEffort.isEmpty else { return "" }
         let levels = model?.thinkingLevels ?? []
         if levels.contains(where: { $0.id == currentEffort }) { return currentEffort }
@@ -114,7 +115,7 @@ struct SessionModelSheetState: Equatable {
     /// The raw override reported for the conversation, used unchanged as the sheet's
     /// starting point so opening the sheet never proposes a change by itself.
     static func initialEffort(override: String?) -> String {
-        override?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        override ?? ""
     }
 
     var currentChoice: GatewayModelChoice? {

@@ -136,7 +136,8 @@ struct SessionModelSettingsView: View {
                 {
                     self.reference = model.reference
                     self.effort = SessionModelSheetState.effortAfterSelecting(
-                        model, currentEffort: self.effort, override: self.session?.modelInfo?.thinkingLevel)
+                        model, currentEffort: self.effort, override: self.session?.modelInfo?.thinkingLevel,
+                        currentModelReference: state.currentChoice?.reference)
                     self.error = nil
                 }
             }

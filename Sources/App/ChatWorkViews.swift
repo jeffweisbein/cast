@@ -375,7 +375,8 @@ struct ResultReviewInspector: View {
                     artifact: { item in self.artifactRow(item) },
                     markAllReviewed: { ids in self.store.markDeliverablesReviewed(ids) },
                     showAll: { self.showingAllDeliverables = true })
-                    .task(id: key) {
+                    .task(id: key + "|" + String(self.isPresented)) {
+                        guard self.isPresented else { return }
                         // Bounded refresh of this chat only; existing ledger stays visible offline.
                         self.refreshFailed = false
                         do { try await self.store.refreshArtifacts(sessionKey: key) }

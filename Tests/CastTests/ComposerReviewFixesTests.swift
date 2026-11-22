@@ -195,6 +195,22 @@ final class SessionModelReasoningPreservationTests: XCTestCase {
         XCTAssertNil(state.applyBlocker)
     }
 
+    func testReturningToOriginalModelRestoresItsOverrideWithoutAChange() {
+        let original = self.choice("astra"), other = self.choice("nova", levels: self.levels)
+        let away = SessionModelSheetState.effortAfterSelecting(
+            other, currentEffort: "xhigh", override: "xhigh", currentModelReference: original.reference)
+        XCTAssertEqual(away, "")
+        let restored = SessionModelSheetState.effortAfterSelecting(
+            original, currentEffort: away, override: "xhigh", currentModelReference: original.reference)
+        let state = SessionModelSheetState(
+            sessionModel: "astra", sessionProvider: "openai", thinkingOverride: "xhigh",
+            choices: [original, other], selectedReference: original.reference, selectedEffort: restored)
+        XCTAssertEqual(restored, "xhigh")
+        XCTAssertFalse(state.hasChanges)
+        XCTAssertFalse(state.canApply)
+        XCTAssertFalse(SessionModelMutation.needsThinkingCommand(effort: restored, currentOverride: "xhigh"))
+    }
+
     func testSupportedLevelsCarryAndDeliberateChoicesApply() {
         let astra = self.choice("astra", levels: self.levels), nova = self.choice("nova", levels: self.levels)
         XCTAssertEqual(SessionModelSheetState.effortAfterSelecting(nova, currentEffort: "high", override: "high"), "high")
