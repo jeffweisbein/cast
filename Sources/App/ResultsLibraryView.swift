@@ -189,11 +189,6 @@ struct ResultsLibraryView: View {
         guard let outcome = await DeliverableSync.run(store: self.store, sessionKey: nil) else { return }
         self.syncError = outcome == .unsupported ? nil : outcome.message
         self.hasSynced = true
-        // Check the local download cache for images so thumbnails can show without a fetch.
-        for item in self.store.deliverableLedger.items.prefix(60) where item.webURL == nil && ResultKind.of(item) == .image {
-            if Task.isCancelled { return }
-            await self.store.inspectDownload(item)
-        }
     }
 }
 
@@ -256,6 +251,13 @@ struct ResultCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(self.kind.singular): \(self.item.title), from \(self.conversation)")
         .accessibilityHint("Shows actions for this result.")
+        .task(id: self.item.reviewID) {
+            // Inspect each visible image locally, even on an offline launch. This does not
+            // download files and is not limited to the first page of the ledger.
+            if self.kind == .image && self.item.webURL == nil {
+                await self.store.inspectDownload(self.item)
+            }
+        }
     }
 }
 
