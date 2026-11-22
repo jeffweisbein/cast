@@ -3,6 +3,7 @@ import SwiftUI
 struct ConnectionStatusView: View {
     let store: ChatStore
     var showsWhenHealthy = true
+    var compact = false
     @State private var expanded = false
     private var unconfirmed: Int {
         store.messages.filter { $0.localDeliveryState == .pending || $0.localDeliveryState == .uncertain || $0.localDeliveryState == .failed }.count
@@ -26,7 +27,7 @@ struct ConnectionStatusView: View {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                 }.font(.caption)
             }.buttonStyle(.plain).accessibilityLabel("Connection status: " + ConnectionPresentation.title(store.connectionState) + (unconfirmed > 0 ? ", \(unconfirmed) unconfirmed messages" : ""))
-            if expanded || !connected || unconfirmed > 0 {
+            if !compact && (expanded || !connected || unconfirmed > 0) {
                 Text(ConnectionPresentation.detail(store.connectionState, unconfirmed: unconfirmed))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if case .disconnected = store.connectionState {
@@ -34,5 +35,13 @@ struct ConnectionStatusView: View {
                 }
             }
         }.padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial)
+        .sheet(isPresented: Binding(get: { compact && expanded }, set: { expanded = $0 })) {
+            NavigationStack {
+                VStack { ConnectionStatusView(store: store); Spacer() }
+                    .navigationTitle("Connection")
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { expanded = false } } }
+            }
+            .presentationDetents([.medium, .large])
+        }
     }
 }

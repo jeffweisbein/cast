@@ -106,6 +106,16 @@ struct ChatView: View {
     @State private var needsForegroundReanchor = false
     static let reanchorAttemptLimit = 3
     @FocusState private var composerFocused: Bool
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    #endif
+    private var usesShortLayout: Bool {
+        #if os(iOS)
+        verticalSizeClass == .compact
+        #else
+        false
+        #endif
+    }
 
     init(
         store: ChatStore,
@@ -642,12 +652,13 @@ struct ChatView: View {
         } else if self.layoutStrategy.usesDetachedComposer {
             VStack(spacing: 0) {
                 self.transcriptView
-                ProgressCardView(store: self.store)
+                if !self.usesShortLayout { ProgressCardView(store: self.store) }
                 Composer(
                     store: self.store,
                     allowsSending: self.allowsSending,
                     focused: self.$composerFocused)
                     .equatable()
+                    .layoutPriority(1)
                     #if os(iOS)
                     // The attachment tray, import tiles and a growing draft all change the
                     // detached composer's height, which shrinks the transcript's real frame.
@@ -688,6 +699,7 @@ struct ChatView: View {
                     Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true }
                     Button("Secure entry", systemImage: "key") { showingSecretRequests = true }
                     Divider()
+                    Button("Find in chat", systemImage: "magnifyingglass") { showingFind.toggle() }
                     Button("Library", systemImage: "photo.on.rectangle.angled") { showingLibrary = true }
                     Button("Result", systemImage: "doc.text.magnifyingglass") {
                         store.presentResultReview(!store.isResultReviewPresented)
@@ -722,11 +734,12 @@ struct ChatView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
             #if os(iOS)
-            ConnectionStatusView(store: store, showsWhenHealthy: false)
+            ConnectionStatusView(store: store, showsWhenHealthy: false, compact: self.usesShortLayout)
             #else
             ConnectionStatusView(store: store)
             #endif
-            navigationControls
+            if !self.usesShortLayout || self.showingFind { navigationControls }
+            if !self.usesShortLayout {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
                 if !pending.isEmpty {
@@ -739,6 +752,7 @@ struct ChatView: View {
                     .padding(8).frame(maxWidth: .infinity).background(.regularMaterial)
             }
 
+            }
             if focusedSearchItemID != nil {
                 HStack {
                     Text("Viewing another part of the conversation").font(.caption)
