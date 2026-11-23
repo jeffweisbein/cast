@@ -71,6 +71,7 @@ struct ChatView: View {
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
+    @State private var showingApprovals = false
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
@@ -656,6 +657,11 @@ struct ChatView: View {
             .frame(minHeight: 44)
             .accessibilityIdentifier("chat-pending-questions")
         }
+        if !store.approvals.isEmpty {
+            Button("\(store.approvals.count) approval\(store.approvals.count == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("chat-pending-approvals")
+        }
         if secure {
             Button("Secure entry requested", systemImage: "lock.fill") { showingSecretRequests = true }
                 .frame(minHeight: 44)
@@ -741,6 +747,17 @@ struct ChatView: View {
             ToolbarItem { Button("Secure entry", systemImage: "key") { showingSecretRequests = true } }
             #endif
         }
+        .sheet(isPresented: $showingApprovals) {
+            NavigationStack {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(store.approvals) { ApprovalCardView(approval: $0, store: store) }
+                    }.padding()
+                }
+                .navigationTitle("Approvals")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingApprovals = false } } }
+            }
+        }
         .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
         .sheet(isPresented: $showingSecretRequests) { SecretRequestsView(store: store) }
         .onChange(of: showingFind) { _, _ in refreshFindMatches() }
@@ -762,16 +779,20 @@ struct ChatView: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
                 let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
-                if !pending.isEmpty || secure {
+                if !pending.isEmpty || secure || !store.approvals.isEmpty {
                     // Attention is never hidden by the typing layout. One compact row
                     // replaces the tall banners; each destination keeps a labelled target.
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
                             attentionButtons(questions: pending.count, secure: secure)
                         }
-                        VStack(alignment: .leading, spacing: 0) {
+                        Menu {
                             attentionButtons(questions: pending.count, secure: secure)
+                        } label: {
+                            Label("Needs you (\(pending.count + store.approvals.count + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
+                                .frame(minHeight: 44)
                         }
+                        .accessibilityIdentifier("chat-pending-attention-menu")
                     }
                     .font(.caption)
                     .padding(.horizontal, 12)
@@ -1170,6 +1191,9 @@ struct Composer: View, Equatable {
     @FocusState.Binding var focused: Bool
     @State private var model: ComposerModel
     private let storeIdentity: ObjectIdentifier
+    /// Snapshot focus for Equatable: comparing the live Binding on both sides reads the
+    /// same new value and can suppress the update that dismisses the field's keyboard.
+    private let focusSnapshot: Bool
     /// Imports chosen but not yet attached. Owned per store rather than per view, so it
     /// survives leaving and reopening a conversation.
     private let imports: ComposerImportQueue
@@ -1200,6 +1224,7 @@ struct Composer: View, Equatable {
         self.store = store
         self.allowsSending = allowsSending
         self._focused = focused
+        self.focusSnapshot = focused.wrappedValue
         self._model = State(wrappedValue: ComposerModel(store: store))
         self.storeIdentity = ObjectIdentifier(store)
         self.imports = ComposerImportQueue.queue(for: store)
@@ -1207,6 +1232,7 @@ struct Composer: View, Equatable {
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.storeIdentity == rhs.storeIdentity && lhs.allowsSending == rhs.allowsSending
+            && lhs.focusSnapshot == rhs.focusSnapshot
     }
     #if os(iOS)
     @State private var sendPulse = 0
@@ -1444,14 +1470,16 @@ struct Composer: View, Equatable {
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
                 HStack(spacing: 2) {
-                    if !capturing {
-                        self.addMenu
+                    self.addMenu
+                        .opacity(capturing ? 0 : 1)
+                        .allowsHitTesting(!capturing)
+                        .accessibilityHidden(capturing)
+                    ComposerModelIndicator(store: self.store, style: .toolbar) { presented in
+                        self.modelSheetPresentationChanged(presented)
                     }
-                    if !capturing {
-                        ComposerModelIndicator(store: self.store, style: .toolbar) { presented in
-                            self.modelSheetPresentationChanged(presented)
-                        }
-                    }
+                    .opacity(capturing ? 0 : 1)
+                    .allowsHitTesting(!capturing)
+                    .accessibilityHidden(capturing)
                     Spacer(minLength: 0)
                     Button { self.focused = false } label: {
                         Image(systemName: "keyboard.chevron.compact.down")
