@@ -1,8 +1,8 @@
-# Cast 0.4.0 preview 5
+# Current source updates
 
-Preview 5 brings the current chat-switching improvements and results interface to the
-public Mac download. The app reports **0.4.0 (20)**; the preview tag identifies this public
-release separately from the app's build number.
+The source now includes chat-switching, results-review, iOS navigation and compact typing
+improvements. The validated native build reports **0.4.0 (21)**. This source update does
+not publish preview 5 or a new downloadable app.
 
 ## Changes
 
@@ -16,34 +16,28 @@ release separately from the app's build number.
 - Keep the shared Mac inspector width stable after its initial expansion, including when
   switching between main and side chats.
 
-## Download and update
+- Navigate between Chats, Needs You and Results on iOS, with pinned-chat switching and
+  attachment/model controls that preserve the selected conversation and draft.
+- Use the compact composer and direct Hide Keyboard action; routine chat chrome collapses
+  for a docked software keyboard while pending actions and connection problems stay reachable.
 
-Download the signed, Apple-notarized [Mac ZIP](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.5/Cast-0.4.0-preview.5-macOS-arm64.zip),
-quit Cast, unzip it, and replace Cast.app in Applications. Keep your previous app if you
-want a rollback copy. Do not delete Cast's settings or app data. Manual downloads remain
-the update route; an automatic-update feed is not configured.
+## Downloads
 
-This download targets Apple Silicon Macs running macOS 15 or newer. A reachable OpenClaw
-gateway is still required. This release does not add a public iPhone/iPad download or
-change TestFlight availability.
+The published Mac binary remains [preview 4](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.4),
+**0.4.0 (17)**, for Apple Silicon Macs running macOS 15 or newer. It does not include all
+of these source updates. [Build current source](../CONTRIBUTING.md) to use the newer code.
+A reachable OpenClaw gateway is required for live use. No public iPhone/iPad download or
+TestFlight availability is introduced by this source update.
 
-## Verification and source mapping
+## Verification
 
-The Mac package includes the results design and a compatibility fix for macOS 15: the native
-scroll view preserves the latest-message position when the document frame grows and following
-is active. It stops doing so when the reader scrolls away or starts a search. The same native
-regression failed on the unchanged source and passed with the fix on macOS 15.6.1; no
-assertions or timing thresholds were removed.
+The installed-source revision `5ec9308b70eaf5f70707d08b80bfc3bb0a42de8f` passed 729 native
+macOS tests with no failures or skips. Final targeted simulator UI runs passed five checks
+on the Duo cover layout, five on iPad and three on Air. Source reviews and signed private
+build verification are separate from hosted CI, public binary distribution and physical
+folding, hardware-keyboard or voice-gesture acceptance.
 
-The release notes record the exact embedded source revision and final native test/build
-results. Publication also refreshes XcodeGen 2.47's project/scheme upgrade metadata and
-explicit default architecture selection; target build settings are unchanged.
-
-The signed Mac package is checked independently for source/version metadata, nested
-signatures, and its preserved vendor-signed Hex helper. Apple notarization, a stapled ticket,
-Gatekeeper acceptance, and the published ZIP checksum are separate release checks.
-Hosted CI results are available on the release pull request; the local suite is not a claim
-about hosted CI or physical responsiveness on every Mac.
-
-Native warnings remain documented separately from successful checks. Physical feature
-acceptance and live gateway compatibility remain environment-dependent.
+The macOS transcript-growth regression reproduced on unchanged source and passed after the
+native scroll-frame fix on macOS 15.6.1. Synthetic fixtures and simulator checks do not
+establish responsiveness or hardware behavior on every device. The public pull request
+records hosted checks for the published source revision.
