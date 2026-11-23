@@ -226,6 +226,8 @@ final class IOSPolishUITests: XCTestCase {
                 let menu = app.buttons["chat-pending-attention-menu"]
                 XCTAssertTrue(menu.waitForExistence(timeout: 5))
                 menu.tap()
+                // Span two expiry-clock ticks: open menu actions must remain tappable.
+                Thread.sleep(forTimeInterval: 2.2)
                 let control = app.buttons[identifier]
                 XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(control.isHittable, app.debugDescription)
