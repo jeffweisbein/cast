@@ -1235,6 +1235,8 @@ struct Composer: View, Equatable {
             && lhs.focusSnapshot == rhs.focusSnapshot
     }
     #if os(iOS)
+    @Environment(\.verticalSizeClass) private var composerVerticalSizeClass
+    @Environment(\.dynamicTypeSize) private var composerDynamicTypeSize
     @State private var sendPulse = 0
     @State private var showingPhotos = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -1490,9 +1492,9 @@ struct Composer: View, Equatable {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .disabled(!self.focused)
-                    .opacity(capturing ? 0 : 1)
-                    .allowsHitTesting(!capturing)
-                    .accessibilityHidden(capturing)
+                    .opacity(capturing || !self.focused ? 0 : 1)
+                    .allowsHitTesting(!capturing && self.focused)
+                    .accessibilityHidden(capturing || !self.focused)
                     .accessibilityLabel("Hide keyboard")
                     .accessibilityIdentifier("composer-hide-keyboard")
                     if self.allowsSending {
@@ -1500,7 +1502,6 @@ struct Composer: View, Equatable {
                         // survives the idle → recording swap of the row above.
                         VoiceRecordButton(controller: self.voiceRecorder)
                             .disabled(self.dictation.phase != .idle)
-                            .padding(4)
                     }
                     // Hidden rather than removed while recording: removing it would slide
                     // the microphone sideways under the finger that is holding it.
@@ -1584,7 +1585,7 @@ struct Composer: View, Equatable {
         TextField("Message the fleet…", text: self.$draft, axis: .vertical)
             .accessibilityIdentifier("composer-message-field")
             .textFieldStyle(.plain)
-            .lineLimit(1 ... 5)
+            .lineLimit(1 ... (self.composerVerticalSizeClass == .compact ? 2 : self.composerDynamicTypeSize.isAccessibilitySize ? 3 : 5))
             // Keep the empty field at its intrinsic one-line height inside the
             // detached VStack. It still grows through the line-limit range, and
             // Dynamic Type remains free to increase each line's intrinsic height.

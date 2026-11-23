@@ -287,6 +287,25 @@ struct FixtureLargeText: ViewModifier {
             Deliverable(id: "fixture-link", sessionKey: general, messageID: "m9", title: "Release notes",
                         target: "https://example.com/notes.pdf", kind: "Document", sharedAt: now - 30_000),
         ])
+        let attention = ProcessInfo.processInfo.arguments.contains("--typing-attention")
+        // Only the fictional workspace's setting, never a production preference or restart.
+        UserDefaults.standard.set(attention, forKey: "cast.secretEntry." + profile.id)
+        if attention {
+            func event(_ name: String, _ payload: [String: Any]) {
+                store.handleEvent(try! JSONDecoder().decode(EventFrame.self, from:
+                    JSONSerialization.data(withJSONObject: ["event": name, "payload": payload])))
+            }
+            event("question.requested", ["id": "typing-question", "sessionKey": cast,
+                "createdAtMs": now, "expiresAtMs": now + 3_600_000, "status": "pending",
+                "questions": [["questionId": "choice", "question": "Which layout should we keep?",
+                               "options": [["label": "Compact"], ["label": "Expanded"]]]]])
+            event("question.requested", ["id": "typing-secret", "sessionKey": cast,
+                "expiresAtMs": now + 3_600_000, "status": "pending",
+                "questions": [["questionId": "key", "question": "Provide a fixture credential",
+                    "isSecret": true, "secretStore": ["name": "FIXTURE_KEY", "kind": "secret"]]]])
+            event("exec.approval.requested", ["id": "typing-approval", "expiresAtMs": now + 3_600_000,
+                "request": ["command": "Review fixture report", "sessionKey": cast]])
+        }
         // The operator's own pinned order, deliberately not alphabetical or by activity.
         for (index, key) in [cast, cackles, runpr, general].enumerated() {
             store.updatePersonalChat(key) { $0.kept = true; $0.pinned = true; $0.rank = Double(index) }

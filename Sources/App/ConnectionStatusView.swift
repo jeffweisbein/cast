@@ -5,6 +5,7 @@ struct ConnectionStatusView: View {
     var showsWhenHealthy = true
     var compact = false
     @State private var expanded = false
+    @State private var showingDetails = false
     private var unconfirmed: Int {
         store.messages.filter { $0.localDeliveryState == .pending || $0.localDeliveryState == .uncertain || $0.localDeliveryState == .failed }.count
     }
@@ -17,7 +18,9 @@ struct ConnectionStatusView: View {
 
     private var statusContent: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button { expanded.toggle() } label: {
+            Button {
+                if compact { showingDetails = true } else { expanded.toggle() }
+            } label: {
                 HStack {
                     Image(systemName: connected ? "checkmark.circle" : "wifi.exclamationmark")
                         .foregroundStyle(connected ? Color.green : Color.orange)
@@ -35,11 +38,11 @@ struct ConnectionStatusView: View {
                 }
             }
         }.padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial)
-        .sheet(isPresented: Binding(get: { compact && expanded }, set: { expanded = $0 })) {
+        .sheet(isPresented: $showingDetails) {
             NavigationStack {
                 VStack { ConnectionStatusView(store: store); Spacer() }
                     .navigationTitle("Connection")
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { expanded = false } } }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingDetails = false } } }
             }
             .presentationDetents([.medium, .large])
         }

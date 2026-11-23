@@ -43,9 +43,11 @@ struct ComposerModelIndicator: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
+                    .opacity(self.isConnected ? 1 : 0.6)
                     .overlay(alignment: .topTrailing) {
                         if pending {
-                            Circle().fill(.orange).frame(width: 6, height: 6).padding(6)
+                            Image(systemName: "clock.fill")
+                                .font(.system(size: 9)).foregroundStyle(.orange).padding(3)
                         }
                     }
             }

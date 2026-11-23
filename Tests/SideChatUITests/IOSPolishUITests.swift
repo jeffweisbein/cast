@@ -166,6 +166,7 @@ final class IOSPolishUITests: XCTestCase {
             let hide = app.buttons["composer-hide-keyboard"]
             XCTAssertTrue(hide.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(hide.isHittable)
+            XCTAssertTrue(hide.isEnabled)
             XCTAssertGreaterThanOrEqual(hide.frame.width, 43.99)
             XCTAssertGreaterThanOrEqual(hide.frame.height, 43.99)
             XCTAssertTrue(self.gone(app.buttons["Jump to"]), "Routine navigation must collapse for the docked keyboard")
@@ -179,6 +180,73 @@ final class IOSPolishUITests: XCTestCase {
             XCTAssertEqual(self.draftText(self.composerField(app)), "Keep this draft")
             self.waitForSelection(app, self.cast, "Dismissal must preserve the selected chat")
             self.attach(app, arguments.isEmpty ? "bear-standard-dismissed" : "bear-large-text-dismissed")
+            app.terminate()
+        }
+    }
+
+    func testConnectionExpansionDoesNotPresentSheetWhenTyping() throws {
+        let app = self.launch()
+        defer { app.terminate() }
+        self.openChat(app, self.cast)
+        app.buttons["composer-hide-keyboard"].tap()
+        XCTAssertTrue(self.gone(app.keyboards.firstMatch))
+        let status = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connection status:")).firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        status.tap()
+        self.composerField(app).tap()
+        self.composerField(app).typeText("Connection draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(self.gone(app.buttons["Jump to"]))
+        XCTAssertFalse(app.navigationBars["Connection"].exists, "Keyboard docking must not promote inline state into a modal")
+        XCTAssertEqual(self.draftText(self.composerField(app)), "Connection draft")
+        status.tap()
+        XCTAssertTrue(app.navigationBars["Connection"].waitForExistence(timeout: 5), "Explicit compact-status tap must still open details")
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(self.gone(app.navigationBars["Connection"]))
+    }
+
+    func testTypingAttentionRemainsReachable() throws {
+        for arguments in [["--typing-attention"], ["--typing-attention", "--large-text"]] {
+            let app = self.launch(arguments)
+            self.openChat(app, self.cast)
+            self.composerField(app).tap()
+            self.composerField(app).typeText("Attention draft")
+            for (identifier, title) in [("chat-pending-questions", "Questions"),
+                                       ("chat-pending-approvals", "Approvals"),
+                                       ("chat-pending-secure-entry", "Secure entry")] {
+                let menu = app.buttons["chat-pending-attention-menu"]
+                if menu.exists { menu.tap() }
+                let control = app.buttons[identifier]
+                XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertTrue(control.isHittable)
+                control.tap()
+                XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5), app.debugDescription)
+                app.buttons["Done"].firstMatch.tap()
+                XCTAssertTrue(self.gone(app.navigationBars[title]))
+                XCTAssertEqual(self.draftText(self.composerField(app)), "Attention draft")
+                self.composerField(app).tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            }
+            self.attach(app, arguments.count == 1 ? "bear-attention-standard" : "bear-attention-large-text")
+            app.terminate()
+        }
+    }
+
+    /// The identical measurement can run on the shipped baseline without a new app seam.
+    func testTypingViewportMeasurement() throws {
+        for arguments in [[String](), ["--large-text"]] {
+            let app = self.launch(arguments)
+            self.openChat(app, self.cast)
+            self.composerField(app).tap()
+            self.composerField(app).typeText("Keep this draft")
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            let field = self.composerField(app)
+            let scrolls = app.scrollViews.allElementsBoundByIndex.filter {
+                $0.frame.width > 100 && $0.frame.minY < field.frame.minY && $0.frame.maxY <= field.frame.minY + 1
+            }
+            self.record(scrolls.map { "scroll: \($0.frame)" } + ["field: \(field.frame)", "keyboard: \(app.keyboards.firstMatch.frame)"],
+                        arguments.isEmpty ? "viewport-standard" : "viewport-large-text")
+            self.attach(app, arguments.isEmpty ? "viewport-standard" : "viewport-large-text")
             app.terminate()
         }
     }

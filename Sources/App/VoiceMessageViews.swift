@@ -77,7 +77,11 @@ struct VoiceRecordButton: View {
         Image(systemName: self.isRecording ? "mic.fill" : "mic")
             .font(.system(size: 15, weight: .medium))
             .foregroundStyle(self.isRecording ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+            #if os(iOS)
+            .frame(width: 44, height: 44)
+            #else
             .frame(width: 28, height: 28)
+            #endif
             .scaleEffect(self.isRecording && !self.reduceMotion ? 1.2 : 1)
             .animation(self.reduceMotion ? nil : .spring(duration: 0.25), value: self.isRecording)
             .contentShape(Circle())
