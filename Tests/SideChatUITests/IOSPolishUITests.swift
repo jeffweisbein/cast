@@ -190,8 +190,12 @@ final class IOSPolishUITests: XCTestCase {
         self.openChat(app, self.cast)
         app.buttons["composer-hide-keyboard"].tap()
         XCTAssertTrue(self.gone(app.keyboards.firstMatch))
-        let status = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connection status:")).firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        let fieldMidX = self.composerField(app).frame.midX
+        let candidates = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connection status:")).allElementsBoundByIndex
+        self.record(candidates.map { "status: \($0.frame)" }, "connection-status-candidates")
+        let inChat = candidates.filter { $0.frame.minX < fieldMidX && $0.frame.maxX > fieldMidX }
+        XCTAssertEqual(inChat.count, 1, "Select the chat status, not the iPad sidebar status")
+        let status = try XCTUnwrap(inChat.first)
         status.tap()
         self.composerField(app).tap()
         self.composerField(app).typeText("Connection draft")
@@ -218,7 +222,7 @@ final class IOSPolishUITests: XCTestCase {
                 if menu.exists { menu.tap() }
                 let control = app.buttons[identifier]
                 XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
-                XCTAssertTrue(control.isHittable)
+                XCTAssertTrue(control.isHittable, app.debugDescription)
                 control.tap()
                 XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5), app.debugDescription)
                 app.buttons["Done"].firstMatch.tap()

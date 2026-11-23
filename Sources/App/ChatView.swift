@@ -785,20 +785,15 @@ struct ChatView: View {
                 let approvals = store.approvals.filter { !$0.isExpired }.count
                 let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
                 if !pending.isEmpty || secure || approvals > 0 {
-                    // Attention is never hidden by the typing layout. One compact row
-                    // replaces the tall banners; each destination keeps a labelled target.
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 8) {
-                            attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
-                        }
-                        Menu {
-                            attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
-                        } label: {
-                            Label("Needs you (\(pending.count + approvals + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
-                                .frame(minHeight: 44)
-                        }
-                        .accessibilityIdentifier("chat-pending-attention-menu")
+                    // One stable entry stays mounted while a sheet/menu changes keyboard
+                    // geometry; swapping adaptive branches can dismiss an open menu.
+                    Menu {
+                        attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
+                    } label: {
+                        Label("Needs you (\(pending.count + approvals + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
+                            .frame(minHeight: 44)
                     }
+                    .accessibilityIdentifier("chat-pending-attention-menu")
                     .font(.caption)
                     .padding(.horizontal, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
