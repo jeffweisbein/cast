@@ -201,6 +201,22 @@ struct LandscapeSidebarFixture: View {
                     .font(.system(size: 1)).allowsHitTesting(false)
                     .accessibilityIdentifier("fixture-selected-chat")
             }
+            .overlay(alignment: .bottomTrailing) {
+                Text(String(streamTicks)).font(.system(size: 1)).allowsHitTesting(false)
+                    .accessibilityIdentifier("fixture-stream-ticks")
+            }
+            .task {
+                guard ProcessInfo.processInfo.arguments.contains("--typing-attention-streaming") else { return }
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    let store = manager.selectedStore
+                    guard let key = store.selectedSessionKey else { continue }
+                    streamTicks += 1
+                    let payload: [String: Any] = ["event": "chat", "payload": ["sessionKey": key,
+                        "state": "delta", "replace": true, "deltaText": "Streaming fixture update \(streamTicks)"]]
+                    store.handleEvent(try! JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: payload)))
+                }
+            }
     }
 }
 
@@ -316,6 +332,7 @@ struct FixtureLargeText: ViewModifier {
 /// Production root, untouched. The overlay is the only addition: a one-point, non-interactive
 /// readout of the selected conversation so a test can prove where a tap really navigated.
 struct IOSPolishFixture: View {
+    @State private var streamTicks = 0
     @ObservedObject var manager: WorkspaceManager
     var body: some View {
         ContentView()
@@ -324,6 +341,22 @@ struct IOSPolishFixture: View {
                 Text(manager.selectedStore.selectedSessionKey ?? "none")
                     .font(.system(size: 1)).allowsHitTesting(false)
                     .accessibilityIdentifier("fixture-selected-chat")
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Text(String(streamTicks)).font(.system(size: 1)).allowsHitTesting(false)
+                    .accessibilityIdentifier("fixture-stream-ticks")
+            }
+            .task {
+                guard ProcessInfo.processInfo.arguments.contains("--typing-attention-streaming") else { return }
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    let store = manager.selectedStore
+                    guard let key = store.selectedSessionKey else { continue }
+                    streamTicks += 1
+                    let payload: [String: Any] = ["event": "chat", "payload": ["sessionKey": key,
+                        "state": "delta", "replace": true, "deltaText": "Streaming fixture update \(streamTicks)"]]
+                    store.handleEvent(try! JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: payload)))
+                }
             }
     }
 }

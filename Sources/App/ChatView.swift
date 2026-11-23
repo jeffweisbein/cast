@@ -72,9 +72,6 @@ struct ChatView: View {
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
     @State private var showingApprovals = false
-    #if os(iOS)
-    @State private var attentionDate = Date.now
-    #endif
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
@@ -652,27 +649,6 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func attentionButtons(questions: Int, approvals: Int, secure: Bool) -> some View {
-        if questions > 0 {
-            Button("\(questions) question\(questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") {
-                showingQuestions = true
-            }
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("chat-pending-questions")
-        }
-        if approvals > 0 {
-            Button("\(approvals) approval\(approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("chat-pending-approvals")
-        }
-        if secure {
-            Button("Secure entry requested", systemImage: "lock.fill") { showingSecretRequests = true }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("chat-pending-secure-entry")
-        }
-    }
-
-    @ViewBuilder
     private var transcriptAndComposer: some View {
         if !self.showsComposer {
             self.transcriptView
@@ -783,35 +759,9 @@ struct ChatView: View {
             #endif
             if !self.usesShortLayout || self.showingFind { navigationControls }
             #if os(iOS)
-            Group {
-                let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: attentionDate) }
-                let approvals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > attentionDate.timeIntervalSince1970 * 1000 }.count
-                let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
-                if !pending.isEmpty || secure || approvals > 0 {
-                    // One stable entry stays mounted while a sheet/menu changes keyboard
-                    // geometry; swapping adaptive branches can dismiss an open menu.
-                    Menu {
-                        attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
-                    } label: {
-                        Label("Needs you (\(pending.count + approvals + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
-                            .frame(minHeight: 44)
-                    }
-                    .accessibilityIdentifier("chat-pending-attention-menu")
-                    .font(.caption)
-                    .padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.regularMaterial)
-                }
-            }
-            // Do not rebuild UIKit menu actions on every TimelineView tick. Only
-            // invalidate the control when time actually changes the pending counts.
-            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
-                let oldQuestions = store.questionInbox.sorted.filter { $0.request.isPending(at: attentionDate) }.count
-                let newQuestions = store.questionInbox.sorted.filter { $0.request.isPending(at: date) }.count
-                let oldApprovals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > attentionDate.timeIntervalSince1970 * 1000 }.count
-                let newApprovals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > date.timeIntervalSince1970 * 1000 }.count
-                if oldQuestions != newQuestions || oldApprovals != newApprovals { attentionDate = date }
-            }
+            PendingAttentionMenu(store: store, showingQuestions: $showingQuestions,
+                                 showingApprovals: $showingApprovals, showingSecretRequests: $showingSecretRequests)
+                .equatable()
             #else
             if !self.usesShortLayout {
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -1194,6 +1144,81 @@ struct StreamingView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+#if os(iOS)
+/// Own observation scope: streaming transcript updates must not rebuild an open UIMenu.
+private struct PendingAttentionMenu: View, Equatable {
+    let store: ChatStore
+    let storeIdentity: ObjectIdentifier
+    @Binding var showingQuestions: Bool
+    @Binding var showingApprovals: Bool
+    @Binding var showingSecretRequests: Bool
+    @State private var attentionDate = Date.now
+
+    init(store: ChatStore, showingQuestions: Binding<Bool>, showingApprovals: Binding<Bool>, showingSecretRequests: Binding<Bool>) {
+        self.store = store
+        self.storeIdentity = ObjectIdentifier(store)
+        self._showingQuestions = showingQuestions
+        self._showingApprovals = showingApprovals
+        self._showingSecretRequests = showingSecretRequests
+    }
+
+    // These bindings only deliver actions to this stable parent; their values don't
+    // determine this row. Store observation and local expiry state still invalidate it.
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.storeIdentity == rhs.storeIdentity }
+
+    private struct Summary: Equatable {
+        let questions: Int
+        let approvals: Int
+        let secure: Bool
+        var total: Int { questions + approvals + (secure ? 1 : 0) }
+    }
+
+    private func summary(at date: Date) -> Summary {
+        Summary(questions: store.questionInbox.sorted.filter { $0.request.isPending(at: date) }.count,
+                approvals: store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > date.timeIntervalSince1970 * 1000 }.count,
+                secure: store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) })
+    }
+
+    var body: some View {
+        let pending = summary(at: attentionDate)
+        Group {
+            if pending.total > 0 {
+                Menu {
+                    if pending.questions > 0 {
+                        Button("\(pending.questions) question\(pending.questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") { showingQuestions = true }
+                            .accessibilityIdentifier("chat-pending-questions")
+                    }
+                    if pending.approvals > 0 {
+                        Button("\(pending.approvals) approval\(pending.approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
+                            .accessibilityIdentifier("chat-pending-approvals")
+                    }
+                    if pending.secure {
+                        Button("Secure entry requested", systemImage: "lock.fill") { showingSecretRequests = true }
+                            .accessibilityIdentifier("chat-pending-secure-entry")
+                    }
+                } label: {
+                    Label("Needs you (\(pending.total))", systemImage: "exclamationmark.bubble")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("chat-pending-attention-menu")
+                .accessibilityValue("\(pending.questions) questions, \(pending.approvals) approvals" + (pending.secure ? ", secure entry requested" : ""))
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial)
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                let now = Date.now
+                if summary(at: now) != summary(at: attentionDate) { attentionDate = now }
+            }
+        }
+    }
+}
+#endif
 
 struct Composer: View, Equatable {
     let store: ChatStore

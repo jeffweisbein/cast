@@ -215,8 +215,16 @@ final class IOSPolishUITests: XCTestCase {
     }
 
     func testTypingAttentionRemainsReachable() throws {
+        try verifyTypingAttention(streaming: false)
+    }
+
+    func testTypingAttentionDuringStreamingRemainsReachable() throws {
+        try verifyTypingAttention(streaming: true)
+    }
+
+    private func verifyTypingAttention(streaming: Bool) throws {
         for arguments in [["--typing-attention"], ["--typing-attention", "--large-text"]] {
-            let app = self.launch(arguments)
+            let app = self.launch(arguments + (streaming ? ["--typing-attention-streaming"] : []))
             self.openChat(app, self.cast)
             self.composerField(app).tap()
             self.composerField(app).typeText("Attention draft")
@@ -225,9 +233,14 @@ final class IOSPolishUITests: XCTestCase {
                                        ("chat-pending-secure-entry", "Secure entry")] {
                 let menu = app.buttons["chat-pending-attention-menu"]
                 XCTAssertTrue(menu.waitForExistence(timeout: 5))
+                let ticksBefore = Int(app.staticTexts["fixture-stream-ticks"].label) ?? 0
                 menu.tap()
                 // Span two expiry-clock ticks: open menu actions must remain tappable.
                 Thread.sleep(forTimeInterval: 2.2)
+                if streaming {
+                    let ticksAfter = Int(app.staticTexts["fixture-stream-ticks"].label) ?? 0
+                    XCTAssertGreaterThan(ticksAfter, ticksBefore + 2, "Fixture must keep streaming while the menu is open")
+                }
                 let control = app.buttons[identifier]
                 XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(control.isHittable, app.debugDescription)
