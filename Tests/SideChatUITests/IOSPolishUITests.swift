@@ -227,7 +227,7 @@ final class IOSPolishUITests: XCTestCase {
             let app = self.launch(arguments + (streaming ? ["--typing-attention-streaming"] : []))
             self.openChat(app, self.cast)
             self.composerField(app).tap()
-            self.composerField(app).typeText("Attention draft")
+            self.composerField(app).typeText("Attention 4827")
             for (identifier, title) in [("chat-pending-questions", "Questions"),
                                        ("chat-pending-approvals", "Approvals"),
                                        ("chat-pending-secure-entry", "Secure entry")] {
@@ -248,7 +248,7 @@ final class IOSPolishUITests: XCTestCase {
                 XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5), app.debugDescription)
                 app.buttons["Done"].firstMatch.tap()
                 XCTAssertTrue(self.gone(app.navigationBars[title]))
-                XCTAssertEqual(self.draftText(self.composerField(app)), "Attention draft")
+                XCTAssertEqual(self.draftText(self.composerField(app)), "Attention 4827")
                 self.composerField(app).tap()
                 XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
             }
