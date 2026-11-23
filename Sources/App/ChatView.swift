@@ -649,7 +649,7 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func attentionButtons(questions: Int, secure: Bool) -> some View {
+    private func attentionButtons(questions: Int, approvals: Int, secure: Bool) -> some View {
         if questions > 0 {
             Button("\(questions) question\(questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") {
                 showingQuestions = true
@@ -657,8 +657,8 @@ struct ChatView: View {
             .frame(minHeight: 44)
             .accessibilityIdentifier("chat-pending-questions")
         }
-        if !store.approvals.isEmpty {
-            Button("\(store.approvals.count) approval\(store.approvals.count == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
+        if approvals > 0 {
+            Button("\(approvals) approval\(approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("chat-pending-approvals")
         }
@@ -751,7 +751,11 @@ struct ChatView: View {
             NavigationStack {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        ForEach(store.approvals) { ApprovalCardView(approval: $0, store: store) }
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            let pending = store.approvals.filter { !$0.isExpired }
+                            if pending.isEmpty { Text("No approvals waiting in this workspace.").foregroundStyle(.secondary) }
+                            ForEach(pending) { ApprovalCardView(approval: $0, store: store) }
+                        }
                     }.padding()
                 }
                 .navigationTitle("Approvals")
@@ -778,18 +782,19 @@ struct ChatView: View {
             #if os(iOS)
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
+                let approvals = store.approvals.filter { !$0.isExpired }.count
                 let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
-                if !pending.isEmpty || secure || !store.approvals.isEmpty {
+                if !pending.isEmpty || secure || approvals > 0 {
                     // Attention is never hidden by the typing layout. One compact row
                     // replaces the tall banners; each destination keeps a labelled target.
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
-                            attentionButtons(questions: pending.count, secure: secure)
+                            attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
                         }
                         Menu {
-                            attentionButtons(questions: pending.count, secure: secure)
+                            attentionButtons(questions: pending.count, approvals: approvals, secure: secure)
                         } label: {
-                            Label("Needs you (\(pending.count + store.approvals.count + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
+                            Label("Needs you (\(pending.count + approvals + (secure ? 1 : 0)))", systemImage: "exclamationmark.bubble")
                                 .frame(minHeight: 44)
                         }
                         .accessibilityIdentifier("chat-pending-attention-menu")
