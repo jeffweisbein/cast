@@ -759,7 +759,7 @@ struct ChatView: View {
             #endif
             if !self.usesShortLayout || self.showingFind { navigationControls }
             #if os(iOS)
-            PendingAttentionMenu(store: store, showingQuestions: $showingQuestions,
+            PendingAttentionControl(store: store, showingQuestions: $showingQuestions,
                                  showingApprovals: $showingApprovals, showingSecretRequests: $showingSecretRequests)
                 .equatable()
             #else
@@ -1146,14 +1146,17 @@ struct StreamingView: View {
 }
 
 #if os(iOS)
-/// Own observation scope: streaming transcript updates must not rebuild an open UIMenu.
-private struct PendingAttentionMenu: View, Equatable {
+/// Keep pending work discoverable without a keyboard-anchored native menu.
+private struct PendingAttentionControl: View, Equatable {
     let store: ChatStore
     let storeIdentity: ObjectIdentifier
     @Binding var showingQuestions: Bool
     @Binding var showingApprovals: Bool
     @Binding var showingSecretRequests: Bool
     @State private var attentionDate = Date.now
+    @State private var showingOptions = false
+    @State private var destination: Destination?
+    private enum Destination { case questions, approvals, secure }
 
     init(store: ChatStore, showingQuestions: Binding<Bool>, showingApprovals: Binding<Bool>, showingSecretRequests: Binding<Bool>) {
         self.store = store
@@ -1184,20 +1187,7 @@ private struct PendingAttentionMenu: View, Equatable {
         let pending = summary(at: attentionDate)
         Group {
             if pending.total > 0 {
-                Menu {
-                    if pending.questions > 0 {
-                        Button("\(pending.questions) question\(pending.questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") { showingQuestions = true }
-                            .accessibilityIdentifier("chat-pending-questions")
-                    }
-                    if pending.approvals > 0 {
-                        Button("\(pending.approvals) approval\(pending.approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") { showingApprovals = true }
-                            .accessibilityIdentifier("chat-pending-approvals")
-                    }
-                    if pending.secure {
-                        Button("Secure entry requested", systemImage: "lock.fill") { showingSecretRequests = true }
-                            .accessibilityIdentifier("chat-pending-secure-entry")
-                    }
-                } label: {
+                Button { showingOptions = true } label: {
                     Label("Needs you (\(pending.total))", systemImage: "exclamationmark.bubble")
                         .frame(minHeight: 44)
                 }
@@ -1208,6 +1198,43 @@ private struct PendingAttentionMenu: View, Equatable {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial)
             }
+        }
+        .sheet(isPresented: $showingOptions, onDismiss: {
+            // Route only after the chooser has finished dismissing, so it never
+            // competes with the destination sheet for the same presentation.
+            let selected = destination
+            destination = nil
+            switch selected {
+            case .questions: showingQuestions = true
+            case .approvals: showingApprovals = true
+            case .secure: showingSecretRequests = true
+            case nil: break
+            }
+        }) {
+            NavigationStack {
+                List {
+                    let current = summary(at: attentionDate)
+                    if current.questions > 0 {
+                        Button("\(current.questions) question\(current.questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") {
+                            destination = .questions; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-questions")
+                    }
+                    if current.approvals > 0 {
+                        Button("\(current.approvals) approval\(current.approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") {
+                            destination = .approvals; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-approvals")
+                    }
+                    if current.secure {
+                        Button("Secure entry requested", systemImage: "lock.fill") {
+                            destination = .secure; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-secure-entry")
+                    }
+                    if current.total == 0 { Text("Nothing waiting for you.").foregroundStyle(.secondary) }
+                }
+                .navigationTitle("Needs you")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingOptions = false } } }
+            }
+            .presentationDetents([.medium, .large])
         }
         .task {
             while !Task.isCancelled {

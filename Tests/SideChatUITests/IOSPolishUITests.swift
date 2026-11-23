@@ -235,12 +235,8 @@ final class IOSPolishUITests: XCTestCase {
                 XCTAssertTrue(menu.waitForExistence(timeout: 5))
                 let ticksBefore = Int(app.staticTexts["fixture-stream-ticks"].label) ?? 0
                 menu.tap()
-                // Span two expiry-clock ticks: open menu actions must remain tappable.
+                // Span two expiry-clock ticks: presented attention actions must remain tappable.
                 Thread.sleep(forTimeInterval: 2.2)
-                if streaming {
-                    let ticksAfter = Int(app.staticTexts["fixture-stream-ticks"].label) ?? 0
-                    XCTAssertGreaterThan(ticksAfter, ticksBefore + 2, "Fixture must keep streaming while the menu is open")
-                }
                 let control = app.buttons[identifier]
                 XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(control.isHittable, app.debugDescription)
@@ -249,6 +245,10 @@ final class IOSPolishUITests: XCTestCase {
                 app.buttons["Done"].firstMatch.tap()
                 XCTAssertTrue(self.gone(app.navigationBars[title]))
                 XCTAssertEqual(self.draftText(self.composerField(app)), "Attention 4827")
+                if streaming {
+                    let ticksAfter = Int(app.staticTexts["fixture-stream-ticks"].label) ?? 0
+                    XCTAssertGreaterThan(ticksAfter, ticksBefore + 2, "Fixture must keep streaming through the attention presentation")
+                }
                 self.composerField(app).tap()
                 XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
             }
