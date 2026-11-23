@@ -19,7 +19,8 @@ final class IOSComposerLayoutTests: XCTestCase {
         let end = try XCTUnwrap(suffix.range(of: "#endif"))
         let composerField = String(suffix[..<end.lowerBound])
 
-        XCTAssertTrue(composerField.contains(".lineLimit(1 ... 12)"))
+        // Keep one intrinsic line, with bounded multiline growth for each typing layout.
+        XCTAssertTrue(composerField.contains(".lineLimit(1 ... (self.composerVerticalSizeClass == .compact ? 2 : self.composerDynamicTypeSize.isAccessibilitySize ? 3 : 5))"))
         XCTAssertTrue(composerField.contains(".fixedSize(horizontal: false, vertical: true)"))
         XCTAssertFalse(composerField.contains(".frame(maxHeight:"))
     }

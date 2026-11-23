@@ -203,7 +203,12 @@ final class IOSPolishUITests: XCTestCase {
         XCTAssertTrue(self.gone(app.buttons["Jump to"]))
         XCTAssertFalse(app.navigationBars["Connection"].exists, "Keyboard docking must not promote inline state into a modal")
         XCTAssertEqual(self.draftText(self.composerField(app)), "Connection draft")
-        status.tap()
+        // Accessibility order changes when the sidebar relayouts for the keyboard.
+        let compactStatus = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connection status:")).allElementsBoundByIndex.filter {
+            $0.frame.minX < fieldMidX && $0.frame.maxX > fieldMidX
+        }
+        XCTAssertEqual(compactStatus.count, 1)
+        try XCTUnwrap(compactStatus.first).tap()
         XCTAssertTrue(app.navigationBars["Connection"].waitForExistence(timeout: 5), "Explicit compact-status tap must still open details")
         app.buttons["Done"].firstMatch.tap()
         XCTAssertTrue(self.gone(app.navigationBars["Connection"]))
@@ -219,7 +224,8 @@ final class IOSPolishUITests: XCTestCase {
                                        ("chat-pending-approvals", "Approvals"),
                                        ("chat-pending-secure-entry", "Secure entry")] {
                 let menu = app.buttons["chat-pending-attention-menu"]
-                if menu.exists { menu.tap() }
+                XCTAssertTrue(menu.waitForExistence(timeout: 5))
+                menu.tap()
                 let control = app.buttons[identifier]
                 XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(control.isHittable, app.debugDescription)

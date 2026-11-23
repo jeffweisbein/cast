@@ -72,6 +72,9 @@ struct ChatView: View {
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
     @State private var showingApprovals = false
+    #if os(iOS)
+    @State private var attentionDate = Date.now
+    #endif
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
@@ -780,9 +783,9 @@ struct ChatView: View {
             #endif
             if !self.usesShortLayout || self.showingFind { navigationControls }
             #if os(iOS)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
-                let approvals = store.approvals.filter { !$0.isExpired }.count
+            Group {
+                let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: attentionDate) }
+                let approvals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > attentionDate.timeIntervalSince1970 * 1000 }.count
                 let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
                 if !pending.isEmpty || secure || approvals > 0 {
                     // One stable entry stays mounted while a sheet/menu changes keyboard
@@ -799,6 +802,15 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.regularMaterial)
                 }
+            }
+            // Do not rebuild UIKit menu actions on every TimelineView tick. Only
+            // invalidate the control when time actually changes the pending counts.
+            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
+                let oldQuestions = store.questionInbox.sorted.filter { $0.request.isPending(at: attentionDate) }.count
+                let newQuestions = store.questionInbox.sorted.filter { $0.request.isPending(at: date) }.count
+                let oldApprovals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > attentionDate.timeIntervalSince1970 * 1000 }.count
+                let newApprovals = store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > date.timeIntervalSince1970 * 1000 }.count
+                if oldQuestions != newQuestions || oldApprovals != newApprovals { attentionDate = date }
             }
             #else
             if !self.usesShortLayout {
