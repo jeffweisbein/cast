@@ -13,8 +13,16 @@ public struct Deliverable: Codable, Sendable, Equatable, Identifiable {
     public var sizeBytes: Int? = nil
     public var mimeType: String? = nil
     public var downloadMode: String? = nil
-    /// A revised handoff to the same URL deserves a fresh review.
-    public var reviewID: String { self.id + ":" + self.messageID }
+    /// A gateway artifact keeps one identity whichever path (transcript scan or
+    /// `artifacts.list`) last wrote it, so a local review mark sticks. A revised handoff to the
+    /// same plain link still deserves a fresh review, so links keep the message in theirs.
+    public var reviewID: String {
+        if let artifactID, !artifactID.isEmpty { return self.id }
+        return self.id + ":" + self.messageID
+    }
+    /// Download-cache identity: the previous `id:messageID` form, kept byte-for-byte so files
+    /// already downloaded on this device are still found.
+    public var downloadCacheID: String { self.id + ":" + self.messageID }
 
     public var webURL: URL? {
         guard let url = URL(string: self.target), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
@@ -39,6 +47,12 @@ public struct DeliverableLedger: Codable, Sendable, Equatable {
         }
         self.items = indexed.values.sorted { ($0.sharedAt ?? 0, $0.id) > ($1.sharedAt ?? 0, $1.id) }.prefix(1000).map { $0 }
     }
+
+    #if DEBUG
+    mutating func ingestForTesting(_ items: [Deliverable]) {
+        self.items = items
+    }
+    #endif
 
     public mutating func ingest(messages: [ChatMessage], sessionKey: String) {
         var indexed = Dictionary(self.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

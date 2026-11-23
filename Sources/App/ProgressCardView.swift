@@ -80,7 +80,6 @@ struct ProgressCardView: View {
                                 Text(step.step)
                                     .font(.caption)
                                     .foregroundStyle(step.status == .completed ? .secondary : .primary)
-                                    .strikethrough(step.status == .completed, color: .secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
@@ -114,45 +113,16 @@ struct ProgressCardView: View {
 
 // MARK: - Markdown with progress bars
 
-/// Renders card markdown, replacing `<progress value="N" max="M">` tags with native bars.
+/// Renders card markdown, replacing `<progress …>` tags (any attribute order) with native
+/// bars labelled by their `aria-label`.
 private struct ProgressCardMarkdownView: View {
     let markdown: String
 
-    private static let progressRegex: NSRegularExpression = {
-        // Matches <progress value="N" max="M" ...>...</progress>; options .dotMatchesLineSeparators
-        // covers the rare case where content spans lines.
-        try! NSRegularExpression(
-            pattern: #"<progress\s+value="(\d+)"\s+max="(\d+)"[^>]*>.*?</progress>"#,
-            options: [.dotMatchesLineSeparators])
-    }()
-
-    private struct ProgressBar { let value: Int; let max: Int }
-
-    private var progressBars: [ProgressBar] {
-        let range = NSRange(self.markdown.startIndex..., in: self.markdown)
-        return Self.progressRegex.matches(in: self.markdown, range: range).compactMap { match in
-            guard match.numberOfRanges == 3,
-                  let vRange = Range(match.range(at: 1), in: self.markdown),
-                  let mRange = Range(match.range(at: 2), in: self.markdown),
-                  let v = Int(self.markdown[vRange]),
-                  let m = Int(self.markdown[mRange])
-            else { return nil }
-            return ProgressBar(value: v, max: m)
-        }
-    }
-
-    private var strippedMarkdown: String {
-        let range = NSRange(self.markdown.startIndex..., in: self.markdown)
-        return Self.progressRegex
-            .stringByReplacingMatches(in: self.markdown, range: range, withTemplate: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     var body: some View {
+        let parsed = ProgressMarkup.parse(self.markdown)
         VStack(alignment: .leading, spacing: 8) {
-            let stripped = self.strippedMarkdown
-            if !stripped.isEmpty {
-                Markdown(stripped)
+            if !parsed.stripped.isEmpty {
+                Markdown(parsed.stripped)
                     .markdownTheme(.gitHub)
                     // The gitHub theme paints its own surface color behind body text,
                     // which reads as a dark slab inside the card. Inherit the card's
@@ -164,10 +134,18 @@ private struct ProgressCardMarkdownView: View {
                     }
                     .textSelection(.enabled)
             }
-            ForEach(Array(self.progressBars.enumerated()), id: \.0) { _, bar in
-                ProgressView(value: Double(bar.value), total: Double(max(bar.max, 1)))
-                    .progressViewStyle(.linear)
-                    .tint(.accentColor)
+            ForEach(Array(parsed.bars.enumerated()), id: \.offset) { _, bar in
+                VStack(alignment: .leading, spacing: 3) {
+                    if let label = bar.label {
+                        Text(label).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: bar.value, total: bar.max)
+                        .progressViewStyle(.linear)
+                        .tint(.accentColor)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(bar.label ?? "Progress")
+                .accessibilityValue("\(Int(bar.value)) of \(Int(bar.max))")
             }
         }
     }
@@ -186,7 +164,7 @@ struct ProgressCardPill: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(Capsule().fill(.tint.opacity(0.8)))
+            .background(Capsule().fill(.tint))
             .accessibilityLabel("\(self.completed) of \(self.total) progress steps done")
     }
 }

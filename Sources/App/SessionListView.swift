@@ -23,6 +23,10 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     @State private var renaming: SessionRow?
     @State private var renameText = ""
     @State private var query = ""
+    @State private var workFilter: ChatWorkFilter = .all
+    /// Re-evaluates time-bound states (question/approval/agent-note expiry) without a
+    /// per-row timer; the sidebar is reduced once per tick.
+    @State private var stateClock = Date()
 
     private var selection: Binding<String?> {
         Binding(get: { store.isSideChatPresented ? store.sideChat?.sessionKey : store.selectedSessionKey },
@@ -31,9 +35,32 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     private var rows: [SessionRow] {
         store.personalChats.filter { query.isEmpty || store.chatTitle($0).localizedCaseInsensitiveContains(query) }
     }
+    static func emptyFilterMessage(_ filter: ChatWorkFilter) -> String {
+        switch filter {
+        case .working: return "No chats are working right now."
+        case .needsYou: return "Nothing needs you right now."
+        case .review: return "No shared files are waiting for review."
+        case .all: return "No chats."
+        }
+    }
+    /// One pass per sidebar evaluation; rows read the dictionary and never touch transcripts.
+    private func workStates(for rows: [SessionRow]) -> [String: ChatWorkState] {
+        store.chatWorkStates(for: rows, at: max(stateClock, Date()))
+    }
+    private func filterCounts(_ states: [String: ChatWorkState]) -> [ChatWorkFilter: Int] {
+        var counts: [ChatWorkFilter: Int] = [:]
+        for state in states.values { counts[state.filter, default: 0] += 1 }
+        return counts
+    }
     var body: some View {
         @Bindable var store = store
         sidebar
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                stateClock = Date()
+            }
+        }
         .task(id: store.lastChatCleanupKey) {
             guard store.lastChatCleanupKey != nil else { return }
             do { try await Task.sleep(for: .seconds(8)) } catch { return }
@@ -57,10 +84,11 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
             // The keyboard reduces available height even on a wide/regular-width phone.
             // Keep one scroll owner: fixed chrome must never squeeze the chats to zero.
             let shortHeight = geometry.size.height < 420
+            let states = workStates(for: store.personalChats)
             List(selection: selection) {
                 if !shortHeight { navigationHeader.sidebarChromeRow() }
-                chatControls(compact: shortHeight).sidebarChromeRow()
-                chatRows(compact: shortHeight)
+                chatControls(compact: shortHeight, states: states).sidebarChromeRow()
+                chatRows(compact: shortHeight, states: states)
                 notices.sidebarChromeRow()
                 manageButton.sidebarChromeRow()
                 if shortHeight { navigationHeader.sidebarChromeRow() }
@@ -69,12 +97,18 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
             .listStyle(.sidebar)
             .contentMargins(.top, shortHeight ? 0 : nil, for: .scrollContent)
             .scrollDismissesKeyboard(.interactively)
+            // Thumb-zone actions: pinned switcher + New chat. Dropped while the keyboard
+            // leaves too little height, so rows always keep the scroll space.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !shortHeight { ChatsBottomControls(store: store) }
+            }
             .refreshable { await store.refreshSessions(); await store.refreshSideChats(); await store.syncChatSidebar() }
         }
         #else
+        let states = workStates(for: store.personalChats)
         VStack(spacing: 0) {
-            chatControls(compact: false)
-            List(selection: selection) { chatRows(compact: false) }
+            chatControls(compact: false, states: states)
+            List(selection: selection) { chatRows(compact: false, states: states) }
                 .listStyle(.sidebar)
                 .refreshable { await store.refreshSessions(); await store.refreshSideChats(); await store.syncChatSidebar() }
             notices
@@ -83,8 +117,9 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
         #endif
     }
 
-    private func chatControls(compact: Bool) -> some View {
+    private func chatControls(compact: Bool, states: [String: ChatWorkState]) -> some View {
         VStack(spacing: 0) {
+            #if os(macOS)
             if !compact {
                 HStack {
                     Text("Chats").font(.headline)
@@ -92,42 +127,70 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
                     newChatButton
                 }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
             }
+            #endif
+            // iOS: the navigation bar already says "Chats" and New chat lives in the bottom
+            // controls, so the list starts directly with search.
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search chats", text: $query).textFieldStyle(.plain)
                     .accessibilityIdentifier("personal-chat-search")
+                // Short heights (landscape phone, keyboard up) drop the bottom controls, so
+                // New chat stays reachable inline instead.
                 if compact { newChatButton }
             }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 12).padding(.bottom, 8)
+                #if os(iOS)
+                .padding(.top, compact ? 0 : 4)
+                #endif
+            // Counts follow the search text so a chip never promises rows the list hides.
+            let searchedKeys = Set(rows.map { SessionKeyMatcher.canonical($0.key) })
+            let counts = filterCounts(states.filter { searchedKeys.contains($0.key) })
+            if !compact, workFilter != .all || counts.values.contains(where: { $0 > 0 }) {
+                ChatFilterBar(filter: $workFilter, counts: counts).padding(.bottom, 6)
+            }
         }
     }
 
     private var newChatButton: some View {
         Button { store.newPersonalChatPresented = true } label: {
+            #if os(iOS)
+            Image(systemName: "square.and.pencil").frame(width: 44, height: 44).contentShape(Rectangle())
+            #else
             Image(systemName: "square.and.pencil").frame(width: 28, height: 28)
+            #endif
         }
         .buttonStyle(.plain).help("New chat")
         .accessibilityLabel("New chat").accessibilityIdentifier("personal-new-chat")
         .keyboardShortcut("n", modifiers: .command)
     }
 
-    @ViewBuilder private func chatRows(compact: Bool) -> some View {
-        let rows = self.rows
+    @ViewBuilder private func chatRows(compact: Bool, states: [String: ChatWorkState]) -> some View {
+        let searched = self.rows
+        // Filtering keeps the pinned-first, user-chosen order; it never re-sorts by state.
+        let rows = ChatWorkStateReducer.filter(searched, by: compact ? .all : workFilter, states: states)
         let pinned = rows.filter { store.isSessionPinned($0.key) }
         let other = rows.filter { !store.isSessionPinned($0.key) }
         if compact {
-            ForEach(pinned + other) { chatRow($0) }
+            ForEach(pinned + other) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) }
         } else {
             if !pinned.isEmpty {
-                Section("Pinned") { ForEach(pinned) { chatRow($0) } }
+                Section("Pinned") { ForEach(pinned) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) } }
             }
             if !other.isEmpty {
-                Section(pinned.isEmpty ? "Your chats" : "Other chats") { ForEach(other) { chatRow($0) } }
+                Section(pinned.isEmpty ? "Your chats" : "Other chats") { ForEach(other) { chatRow($0, state: states[SessionKeyMatcher.canonical($0.key)]) } }
             }
         }
         if rows.isEmpty {
-            Text(query.isEmpty ? "Create a chat or choose an existing one in Manage Chats." : "No matching chats.")
-                .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            if !searched.isEmpty, workFilter != .all {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(query.isEmpty ? Self.emptyFilterMessage(workFilter) : "No matching chats in \(workFilter.title).")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Show all chats") { workFilter = .all }.buttonStyle(.borderless)
+                }.padding(.vertical, 8)
+            } else {
+                Text(query.isEmpty ? "Create a chat or choose an existing one in Manage Chats." : "No matching chats.")
+                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            }
         }
     }
 
@@ -160,17 +223,15 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
         }
     }
 
-    private func chatRow(_ row: SessionRow) -> some View {
+    private func chatRow(_ row: SessionRow, state: ChatWorkState?) -> some View {
         HStack(spacing: 4) {
             Button { store.selectFromSidebar(row.key) } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "bubble.left").foregroundStyle(.secondary).frame(width: 18)
-                    Text(store.chatTitle(row)).lineLimit(1).truncationMode(.tail)
-                        .foregroundStyle(.primary).frame(maxWidth: .infinity, alignment: .leading)
-                    if store.unreadCount(for: row.key) > 0 || row.isUnread {
-                        Circle().fill(.blue).frame(width: 6, height: 6).accessibilityLabel("Unread")
-                    }
-                }.padding(.vertical, 9).contentShape(Rectangle())
+                PersonalChatRowLabel(
+                    title: store.chatTitle(row),
+                    preview: SidebarGrouper.cleanPreview(row.lastMessagePreview),
+                    updated: row.updatedDate,
+                    unread: store.unreadCount(for: row.key) > 0 || row.isUnread,
+                    state: state)
             }.buttonStyle(.plain).accessibilityIdentifier("personal-chat-" + row.key)
             Menu { actions(row) } label: {
                 Image(systemName: "ellipsis").foregroundColor(colorScheme == .dark ? Color.white.opacity(0.8) : Color.black.opacity(0.6)).frame(width: 44, height: 44).contentShape(Rectangle())
@@ -200,8 +261,11 @@ struct SessionListView<NavigationHeader: View, NavigationFooter: View>: View {
     @ViewBuilder private func actions(_ row: SessionRow) -> some View {
         Button(store.isSessionPinned(row.key) ? "Unpin" : "Pin", systemImage: "pin") { store.toggleSessionPinned(row.key) }
         if store.isSessionPinned(row.key) {
+            // Moves act on the full pinned order; a filtered list would hide the neighbour.
             Button("Move up", systemImage: "arrow.up") { store.movePinnedChat(row.key, by: -1) }
+                .disabled(workFilter != .all)
             Button("Move down", systemImage: "arrow.down") { store.movePinnedChat(row.key, by: 1) }
+                .disabled(workFilter != .all)
         }
         Button("Rename", systemImage: "pencil") { renameText = store.chatTitle(row); renaming = row }
         Button(store.isSessionMuted(row.key) ? "Unmute" : "Mute", systemImage: "bell.slash") { store.setSessionMuted(!store.isSessionMuted(row.key), sessionKey: row.key) }

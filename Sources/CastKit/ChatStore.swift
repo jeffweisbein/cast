@@ -230,16 +230,28 @@ enum HistoryBackfillError: Error {
     case invalidNextOffset
 }
 
-/// Bounded most-recently-used cache of in-memory transcripts for instant session
-/// switching. Unbounded, an afternoon of hopping across the fleet retained every
-/// transcript ever opened for the process lifetime; a handful of sessions covers flipping
-/// between active chats, and the disk cache remains the durable fallback for the rest.
+/// Value-type render state travels with the bounded MRU snapshot. Image-bearing
+/// transcripts deliberately do not retain it: groups/builders also reference messages.
+struct TranscriptRenderSnapshot: Sendable {
+    let items: [TranscriptItem]
+    let showsAgentWork: Bool
+    let builder: IncrementalTranscriptBuilder?
+}
+
+/// Bounded most-recently-used cache of in-memory transcripts and prepared display rows.
+/// A handful of sessions covers flipping between active chats; disk remains the durable
+/// fallback. Eviction releases messages, render state and media-hydration metadata together.
 struct TranscriptSnapshotStore: Sendable {
     static let defaultCapacity = 5
 
     private let capacity: Int
     private var recencyOrder: [String] = []
-    private var snapshotsByKey: [String: [ChatMessage]] = [:]
+    private struct Entry: Sendable {
+        let messages: [ChatMessage]
+        let render: TranscriptRenderSnapshot?
+        let needsMediaHydration: Bool
+    }
+    private var snapshotsByKey: [String: Entry] = [:]
 
     init(capacity: Int = Self.defaultCapacity) {
         self.capacity = max(1, capacity)
@@ -248,13 +260,20 @@ struct TranscriptSnapshotStore: Sendable {
     /// Optimistic image bytes are stripped on the way in: the disk cache already persists
     /// them in side files and rehydrates on open, so keeping them here only let a few
     /// pasted screenshots dominate the working set.
-    mutating func store(_ messages: [ChatMessage], for key: String) {
-        self.snapshotsByKey[key] = messages.map { message in
+    mutating func store(_ messages: [ChatMessage], for key: String,
+                        render: TranscriptRenderSnapshot? = nil) {
+        // A rapid switch can save the stripped snapshot before hydration finishes.
+        // Retain its media requirement until eviction rather than losing those images.
+        let needsMedia = self.snapshotsByKey[key]?.needsMediaHydration == true
+            || messages.contains { !$0.localImageData.isEmpty }
+        let storedMessages = needsMedia ? messages.map { message in
             guard !message.localImageData.isEmpty else { return message }
             var stripped = message
             stripped.localImageData = []
             return stripped
-        }
+        } : messages
+        self.snapshotsByKey[key] = Entry(messages: storedMessages,
+            render: needsMedia ? nil : render, needsMediaHydration: needsMedia)
         self.touch(key)
         while self.recencyOrder.count > self.capacity, let oldest = self.recencyOrder.first {
             self.recencyOrder.removeFirst()
@@ -263,9 +282,17 @@ struct TranscriptSnapshotStore: Sendable {
     }
 
     mutating func snapshot(for key: String) -> [ChatMessage]? {
-        guard let messages = self.snapshotsByKey[key] else { return nil }
+        guard let entry = self.snapshotsByKey[key] else { return nil }
         self.touch(key)
-        return messages
+        return entry.messages
+    }
+
+    func renderSnapshot(for key: String) -> TranscriptRenderSnapshot? {
+        self.snapshotsByKey[key]?.render
+    }
+
+    func needsMediaHydration(for key: String) -> Bool {
+        self.snapshotsByKey[key]?.needsMediaHydration == true
     }
 
     private mutating func touch(_ key: String) {
@@ -358,6 +385,9 @@ public final class ChatStore {
     public private(set) var gatewayVersion: String?
     public private(set) var deliverableLedger = DeliverableLedger()
     public private(set) var reviewedWork = ReviewedWorkLedger()
+    /// Gateway-artifact counts per canonical session key, rebuilt only when the ledger or the
+    /// reviewed set actually changes so sidebar rows never scan the ledger.
+    public private(set) var resultArtifactCounts: [String: ResultArtifactCounts] = [:]
     @ObservationIgnored private let deliverableStore: AtomicJSONLedgerStore<DeliverableLedger>
     @ObservationIgnored private let reviewedWorkStore: AtomicJSONLedgerStore<ReviewedWorkLedger>
     @ObservationIgnored private var deliverableIndexTask: Task<Void, Never>?
@@ -542,8 +572,16 @@ public final class ChatStore {
     public var sideChatDiscoveryError: String? { sideChatStorageError ?? sideChatRefreshError ?? sideChatArchiveSyncError }
     public var isSideChatPresented = false {
         didSet {
+            // One trailing inspector: Side chat and Result review are mutually exclusive.
+            if isSideChatPresented, isResultReviewPresented { isResultReviewPresented = false }
             sideChatArchive.isPresented = isSideChatPresented
             persistSideChatArchive()
+        }
+    }
+    /// Transient UI state for the Result review inspector (not persisted).
+    public var isResultReviewPresented = false {
+        didSet {
+            if isResultReviewPresented, isSideChatPresented { isSideChatPresented = false }
         }
     }
     public var savedSideChats: [SavedSideChat] { sideChats(archived: false) }
@@ -1108,8 +1146,11 @@ public final class ChatStore {
         self.deliverableFiles = DeliverableFileCache(root: sidebarRoot.appendingPathComponent("Downloads"))
         self.deliverableStore = AtomicJSONLedgerStore(fileURL: sidebarRoot.appendingPathComponent("deliverables.json"))
         self.reviewedWorkStore = AtomicJSONLedgerStore(fileURL: sidebarRoot.appendingPathComponent("reviewed-work.json"))
-        self.deliverableLedger = (try? self.deliverableStore.load(defaultValue: DeliverableLedger())) ?? DeliverableLedger()
-        self.reviewedWork = (try? self.reviewedWorkStore.load(defaultValue: ReviewedWorkLedger())) ?? ReviewedWorkLedger()
+        let loadedDeliverables = (try? self.deliverableStore.load(defaultValue: DeliverableLedger())) ?? DeliverableLedger()
+        let loadedReviewed = (try? self.reviewedWorkStore.load(defaultValue: ReviewedWorkLedger())) ?? ReviewedWorkLedger()
+        self.deliverableLedger = loadedDeliverables
+        self.reviewedWork = loadedReviewed
+        self.resultArtifactCounts = ResultArtifactCounts.index(ledger: loadedDeliverables.items, reviewed: loadedReviewed.ids)
         let unreadStore = AtomicJSONLedgerStore<UnreadLedger>(
             fileURL: operationsRoot.appendingPathComponent("unread.json"))
         let notificationStore = AtomicJSONLedgerStore<NotificationDeliveryLedger>(
@@ -2198,8 +2239,11 @@ public final class ChatStore {
               let model = self.modelCatalog.first(where: { $0.reference == reference })
         else { throw ModelControlError.unavailable }
         let row = self.sessions.first { $0.key == key }
+        // An override already in force is left alone (no `/think` is sent), so it is not
+        // re-validated against a catalog that may simply not list its levels.
+        let unchangedEffort = effort != nil && effort == row?.modelInfo?.thinkingLevel
         let params = try SessionModelMutation.params(key: key, sessionID: row?.modelInfo?.sessionId,
-                                                     model: model, effort: effort)
+                                                     model: model, effort: unchangedEffort ? nil : effort)
         let generation = clientGeneration
         self.savingModelKeys.insert(key)
         defer { self.savingModelKeys.remove(key) }
@@ -2626,9 +2670,22 @@ public final class ChatStore {
         self.cancelScheduledHistoryRetry(resetAttempt: true)
         self.historySyncState = token.key == nil ? .idle : .loading
         if let previous, !self.messages.isEmpty {
-            self.transcriptSnapshots.store(self.messages, for: previous)
+            let render = self.transcriptCacheShowsAgentWork.flatMap { mode in
+                self.transcriptCacheIsStale ? nil : TranscriptRenderSnapshot(
+                    items: self.transcriptCache, showsAgentWork: mode, builder: self.transcriptBuilder)
+            }
+            self.transcriptSnapshots.store(self.messages, for: previous, render: render)
         }
-        self.messages = token.key.flatMap { self.transcriptSnapshots.snapshot(for: $0) } ?? []
+        let snapshot = token.key.flatMap { self.transcriptSnapshots.snapshot(for: $0) }
+        let needsDiskSnapshot = snapshot == nil
+            || token.key.map { self.transcriptSnapshots.needsMediaHydration(for: $0) } == true
+        self.messages = snapshot ?? []
+        if let render = token.key.flatMap({ self.transcriptSnapshots.renderSnapshot(for: $0) }) {
+            self.transcriptCache = render.items
+            self.transcriptCacheShowsAgentWork = render.showsAgentWork
+            self.transcriptBuilder = render.builder
+            self.transcriptCacheIsStale = false
+        }
         self.streamingText = ""
         self.streamingReasoningText = ""
         self.activeToolName = nil
@@ -2645,11 +2702,11 @@ public final class ChatStore {
         guard token.key != nil else { return }
         if let key = token.key { self.scheduleProgressCardFetch(for: key) }
         self.sessionOpenTask = Task { [weak self] in
-            await self?.openSelectedSession(token: token, previous: previous)
+            await self?.openSelectedSession(token: token, previous: previous, needsDiskSnapshot: needsDiskSnapshot)
         }
     }
 
-    private func openSelectedSession(token: SessionOpenToken, previous: String?) async {
+    private func openSelectedSession(token: SessionOpenToken, previous: String?, needsDiskSnapshot: Bool) async {
         guard let key = token.key else { return }
         let performanceInterval = CastPerformanceDiagnostics.begin(
             .openSelectedSession,
@@ -2659,6 +2716,8 @@ public final class ChatStore {
                 performanceInterval,
                 metadata: "messages=\(self.messages.count) state=\(String(describing: self.historySyncState))")
         }
+        // Keep cleanup ordered ahead of the next subscription, including rapid A/B/A
+        // switches. Cached rows were already restored synchronously by the selection setter.
         if let previous, let client = self.client {
             self.subscribedSessionKeys.remove(previous)
             _ = try? await client.request(method: "sessions.messages.unsubscribe", params: ["key": previous])
@@ -2675,27 +2734,32 @@ public final class ChatStore {
         // Connected opens can replace an oversized legacy blob with the 200-row live tail.
         // Offline, the cache is the only transcript available, so retain the old (slower)
         // decode instead of presenting a long saved conversation as empty.
-        let cachedSnapshot = await self.cache.loadSnapshot(
-            sessionKey: key,
-            allowOversizedLegacyFile: self.client == nil)
-        let cached = cachedSnapshot.messages
-        guard !Task.isCancelled,
-              Self.shouldApplySessionOpen(
-                  token,
-                  generation: self.sessionOpenGeneration,
-                  selectedKey: self.selectedSessionKey)
-        else { return }
-        if !cached.isEmpty {
-            self.messages = Self.reconciledHistory(
-                cached,
-                current: self.messages,
-                pendingEchoes: &self.pendingEchoes)
-        }
-        if !hadCompleteInMemorySnapshot {
-            if cachedSnapshot.isComplete {
-                self.completeHistorySessionKeys.insert(key)
-            } else {
-                self.completeHistorySessionKeys.remove(key)
+        // A warm text snapshot is already newer than its disk copy. Re-decoding and
+        // reconciling it republishes the same rows and discards the prepared render state.
+        // Image snapshots still take the disk path to recover their stripped local bytes.
+        if needsDiskSnapshot {
+            let cachedSnapshot = await self.cache.loadSnapshot(
+                sessionKey: key,
+                allowOversizedLegacyFile: self.client == nil)
+            let cached = cachedSnapshot.messages
+            guard !Task.isCancelled,
+                  Self.shouldApplySessionOpen(
+                      token,
+                      generation: self.sessionOpenGeneration,
+                      selectedKey: self.selectedSessionKey)
+            else { return }
+            if !cached.isEmpty {
+                self.messages = Self.reconciledHistory(
+                    cached,
+                    current: self.messages,
+                    pendingEchoes: &self.pendingEchoes)
+            }
+            if !hadCompleteInMemorySnapshot {
+                if cachedSnapshot.isComplete {
+                    self.completeHistorySessionKeys.insert(key)
+                } else {
+                    self.completeHistorySessionKeys.remove(key)
+                }
             }
         }
         guard self.client != nil else {
@@ -3356,20 +3420,56 @@ public final class ChatStore {
     var attachmentDraftTarget: AttachmentDraftTarget {
         AttachmentDraftTarget(workspaceID: profile.id, gatewayURL: profile.gatewayURL, sessionKey: selectedSessionKey)
     }
-    func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) {
-        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else {
-            if case let .success(attachment) = result { attachment.removeOwnedFile() }; return
+    /// What happened to prepared attachments handed to a draft. Anything not `.accepted` has
+    /// already had its owned files removed; the caller only reports it.
+    enum AttachmentDeliveryOutcome: Equatable, Sendable {
+        case accepted
+        case rejected(String)
+        /// The draft it was prepared for no longer exists in this store.
+        case discarded
+
+        var failureMessage: String? {
+            switch self {
+            case .accepted: return nil
+            case let .rejected(message): return message
+            case .discarded: return "The draft this was prepared for is no longer open, so it was not attached."
+            }
         }
+    }
+
+    /// Adds a prepared batch to the draft it was prepared for, all or nothing, validated
+    /// against that draft (not whichever chat is on screen). Sets no global error: the
+    /// caller reports the outcome where the operator started the import.
+    @discardableResult
+    func deliverPreparedAttachments(_ attachments: [PreparedAttachment], target: AttachmentDraftTarget) -> AttachmentDeliveryOutcome {
+        guard !attachments.isEmpty else { return .accepted }
+        guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL,
+              target.sessionKey != nil || selectedSessionKey == nil else {
+            attachments.forEach { $0.removeOwnedFile() }
+            return .discarded
+        }
+        let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
+        do { try AttachmentProcessor.validateBatch(existing + attachments) }
+        catch {
+            attachments.forEach { $0.removeOwnedFile() }
+            return .rejected(error.localizedDescription)
+        }
+        if let key = target.sessionKey { attachmentDrafts[key, default: []].append(contentsOf: attachments) }
+        else { unselectedAttachments.append(contentsOf: attachments) }
+        return .accepted
+    }
+
+    @discardableResult
+    func finishAttachmentPreparation(_ result: Result<PreparedAttachment, Error>, target: AttachmentDraftTarget) -> AttachmentDeliveryOutcome {
         switch result {
         case let .success(attachment):
-            let existing = target.sessionKey.map { attachmentDrafts[$0] ?? [] } ?? unselectedAttachments
-            do { try AttachmentProcessor.validateBatch(existing + [attachment]) }
-            catch { attachment.removeOwnedFile(); if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }; return }
-            if let key = target.sessionKey { attachmentDrafts[key, default: []].append(attachment) }
-            else if selectedSessionKey == nil { unselectedAttachments.append(attachment) }
-            else { attachment.removeOwnedFile() }
+            let outcome = deliverPreparedAttachments([attachment], target: target)
+            if case let .rejected(message) = outcome, target.sessionKey == selectedSessionKey { lastError = message }
+            return outcome
         case let .failure(error):
+            guard target.workspaceID == profile.id, target.gatewayURL == profile.gatewayURL else { return .discarded }
             if target.sessionKey == selectedSessionKey { lastError = error.localizedDescription }
+            return .rejected(error.localizedDescription)
         }
     }
     public func addAttachment(url: URL) {
@@ -3583,6 +3683,7 @@ public final class ChatStore {
             do {
                 try self.deliverableStore.save(updated)
                 self.deliverableLedger = updated
+                self.refreshResultArtifactCounts()
             } catch { self.showError("Couldn’t save the deliverables index. Your conversation is unchanged.") }
         }
     }
@@ -3602,10 +3703,42 @@ public final class ChatStore {
             acknowledgedFailures: Set(self.projectInventoryRows.filter { self.isFailureAcknowledged($0) }.map(\.key)), now: date)
     }
 
+    /// Rebuilds the cached per-chat artifact counts; assigns only on change so observers
+    /// (sidebar, result card) are not invalidated by an identical ledger rewrite.
+    func refreshResultArtifactCounts() {
+        let counts = ResultArtifactCounts.index(ledger: self.deliverableLedger.items, reviewed: self.reviewedWork.ids)
+        if counts != self.resultArtifactCounts { self.resultArtifactCounts = counts }
+    }
+
+    /// Attention without deliverable review items, so the sidebar never observes or scans
+    /// the deliverable ledger; review state comes from `resultArtifactCounts`.
+    func workAttentionItems(at date: Date) -> [AttentionItem] {
+        let questions = questionInbox.sorted.filter { $0.request.isPending(at: date) }.map { entry in
+            AttentionItem(id: "question:" + entry.id, kind: .question, sessionKey: entry.request.sessionKey,
+                title: "Question waiting", detail: entry.request.questions.first?.question ?? "Answer requested", referenceID: entry.id)
+        }
+        return questions + AttentionReducer.items(
+            sessions: self.projectInventoryRows.filter { $0.archived != true }, approvals: self.approvals,
+            notifications: self.notificationRecords, deliverables: [],
+            reviewed: [], hidden: self.sidebarPreferences.hiddenKeys,
+            acknowledgedFailures: Set(self.projectInventoryRows.filter { self.isFailureAcknowledged($0) }.map(\.key)),
+            now: date)
+    }
+
+    /// One save and one observation change for a batch, instead of one per item.
+    public func markDeliverablesReviewed(_ ids: [String]) {
+        var ledger = self.reviewedWork
+        let before = ledger.ids.count
+        ledger.ids.formUnion(ids)
+        guard ledger.ids.count != before else { return }
+        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger; self.refreshResultArtifactCounts() }
+        catch { self.showError("Couldn’t save review status. Please try again.") }
+    }
+
     public func markDeliverableReviewed(_ id: String) {
         var ledger = self.reviewedWork
         ledger.ids.insert(id)
-        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger }
+        do { try self.reviewedWorkStore.save(ledger); self.reviewedWork = ledger; self.refreshResultArtifactCounts() }
         catch { self.showError("Couldn’t save review status. Please try again.") }
     }
 
@@ -3638,8 +3771,10 @@ public final class ChatStore {
         let artifacts = try decoder.decode(Response.self, from: data).artifacts
         var ledger = deliverableLedger
         ledger.ingest(artifacts: artifacts, sessionKey: sessionKey)
+        guard ledger != deliverableLedger else { return }
         try deliverableStore.save(ledger)
         deliverableLedger = ledger
+        refreshResultArtifactCounts()
     }
 
     public func fetchDeliverable(_ item: Deliverable,
@@ -4589,6 +4724,17 @@ public final class ChatStore {
             "installSessionSnapshotForTesting is for the test host only")
         self.sessions = sessions
         self.reconcileOperations(with: sessions)
+    }
+
+    /// Offline seam for result-review fixtures: replaces the in-memory ledger without saving.
+    func installDeliverablesForTesting(_ items: [Deliverable]) {
+        precondition(
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+            "installDeliverablesForTesting is for the test host only")
+        var ledger = DeliverableLedger()
+        ledger.ingestForTesting(items)
+        self.deliverableLedger = ledger
+        self.refreshResultArtifactCounts()
     }
     #endif
 

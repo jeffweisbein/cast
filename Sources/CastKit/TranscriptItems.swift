@@ -164,18 +164,61 @@ public struct TranscriptWindow: Sendable, Equatable {
     }
     public static let defaultInitialItemCount = 200
     public static let defaultExpansionItemCount = 200
+    /// Rows an eager (non-lazy) transcript builds before its first paint after a
+    /// conversation is opened. An eager stack instantiates and lays out every row in its
+    /// window synchronously, so opening straight at `initialItemCount` froze the macOS main
+    /// thread for well over a second on every switch, cached or not. This is a few
+    /// viewports of tail; the rest of the window follows in `stagedGrowthItemCount` steps.
+    /// Each step also pays a fixed relayout cost, so steps are few rather than tiny.
+    public static let eagerFirstPaintItemCount = 16
+    public static let eagerStagedGrowthItemCount = 23
 
     public let initialItemCount: Int
     public let expansionItemCount: Int
+    /// Window size immediately after `resetForFirstPaint()`. Equal to `initialItemCount`
+    /// when staging is off (lazy transcripts realize rows on demand and need none).
+    public let firstPaintItemCount: Int
+    public let stagedGrowthItemCount: Int
     public private(set) var requestedItemCount: Int
 
     public init(
         initialItemCount: Int = Self.defaultInitialItemCount,
-        expansionItemCount: Int = Self.defaultExpansionItemCount)
+        expansionItemCount: Int = Self.defaultExpansionItemCount,
+        firstPaintItemCount: Int? = nil,
+        stagedGrowthItemCount: Int = Self.eagerStagedGrowthItemCount)
     {
         self.initialItemCount = max(1, initialItemCount)
         self.expansionItemCount = max(1, expansionItemCount)
-        self.requestedItemCount = max(1, initialItemCount)
+        self.firstPaintItemCount = min(
+            self.initialItemCount, max(1, firstPaintItemCount ?? initialItemCount))
+        self.stagedGrowthItemCount = max(1, stagedGrowthItemCount)
+        self.requestedItemCount = self.firstPaintItemCount
+    }
+
+    /// The window an eager transcript uses: a small first paint, then staged growth.
+    public static func stagedForEagerRendering() -> Self {
+        Self(firstPaintItemCount: Self.eagerFirstPaintItemCount)
+    }
+
+    /// True while a freshly opened conversation still shows fewer rows than its normal
+    /// window. Only the first-paint reset produces this state.
+    public var needsStagedGrowth: Bool { self.requestedItemCount < self.initialItemCount }
+
+    /// Starts over for a newly opened conversation: the smallest window that fills the
+    /// screen, so the first paint does not wait for rows the reader cannot see yet.
+    public mutating func resetForFirstPaint() {
+        self.requestedItemCount = self.firstPaintItemCount
+    }
+
+    /// One bounded step toward the normal window. Returns whether more steps remain.
+    /// Never shrinks and never passes `initialItemCount`, so a reader's own Show Earlier
+    /// expansion is left alone.
+    @discardableResult
+    public mutating func growTowardInitialWindow() -> Bool {
+        guard self.needsStagedGrowth else { return false }
+        self.requestedItemCount = min(
+            self.initialItemCount, self.requestedItemCount + self.stagedGrowthItemCount)
+        return self.needsStagedGrowth
     }
 
     public func selection(totalItemCount: Int, anchoredStartIndex: Int? = nil, anchoredEndIndex: Int? = nil) -> TranscriptWindowSelection {
@@ -198,8 +241,11 @@ public struct TranscriptWindow: Sendable, Equatable {
             max(self.requestedItemCount, total - (anchoredStartIndex ?? total)) + self.expansionItemCount)
     }
 
+    /// Collapses a Show Earlier expansion back to the normal window. A window still in
+    /// staged growth keeps its current size: jumping it to `initialItemCount` here would
+    /// reintroduce the single synchronous build the staging exists to avoid.
     public mutating func reset() {
-        self.requestedItemCount = self.initialItemCount
+        self.requestedItemCount = min(self.requestedItemCount, self.initialItemCount)
     }
 }
 

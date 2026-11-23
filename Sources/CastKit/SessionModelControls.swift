@@ -71,7 +71,9 @@ public enum SessionModelMutation {
     }
 
     /// Keeping the model default when no override exists changes nothing, so no command is sent.
+    /// Re-sending the override already in force would only post another acknowledgement,
+    /// so an unchanged level sends nothing.
     public static func needsThinkingCommand(effort: String?, currentOverride: String?) -> Bool {
-        effort != nil || currentOverride != nil
+        (effort != nil || currentOverride != nil) && effort != currentOverride
     }
 }

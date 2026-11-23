@@ -23,7 +23,134 @@ private struct WindowSizingFixture: View {
     }
 }
 
+/// Production composition: split view, ChatView detail, one outer SideChatInspector that also
+/// hosts Result review, bound to the store exactly as ContentView binds it.
+private struct SharedInspectorFixture: View {
+    let store: ChatStore
+    var body: some View {
+        NavigationSplitView {
+            Text("Fixture conversations").navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 380)
+        } detail: {
+            ChatView(store: store, allowsSending: false,
+                     showingSideChat: Binding(get: { store.isSideChatPresented }, set: { store.isSideChatPresented = $0 }))
+                .environment(\.scenePhase, .active)
+        }
+        .modifier(SideChatInspector(store: store, isPresented: Binding(
+            get: { store.isSideChatPresented }, set: { store.isSideChatPresented = $0 })))
+    }
+}
+
 final class MacOSWindowSizingTests: XCTestCase {
+    /// Runtime check for the shared trailing inspector in the real split view. Result review and a
+    /// real restored Side chat alternate in the one outer inspector slot (a detail-column inspector
+    /// previously crashed macOS 15 with a duplicate window separator).
+    ///
+    /// Window size: on macOS 27 / Xcode 27.1 the pre-existing Side chat inspector (baseline b0a31ff,
+    /// same host) widens a 1100x784 window once to 1480x784 on first open and keeps that size after
+    /// closing and across later cycles; macOS 15 does not resize. The window may therefore expand
+    /// at most once, by no more than one inspector column, without changing height or shrinking;
+    /// every later open, swap and close must keep that size (no repeated growth or oscillation).
+    @MainActor
+    func testResultReviewAndRealSideChatShareOneInspectorWithBoundedOneTimeExpansion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let profile = WorkspaceProfile(id: "window-sizing-\(UUID().uuidString)", name: "Window sizing",
+                                       gatewayURL: URL(string: "ws://127.0.0.1:9")!, accent: "orange")
+        let key = "agent:main:main"
+        // A real offline Side chat restored from its archive, closed initially (as after relaunch).
+        let sideKey = "agent:main:cast-side-22222222-2222-4222-8222-222222222222"
+        var archive = SideChatArchive()
+        archive.chats[sideKey] = SavedSideChat(sessionKey: sideKey, sourceSessionKey: key,
+                                               context: "Quoted passage.", title: "Fixture side chat", created: true)
+        archive.selectedKey = sideKey
+        archive.isPresented = false
+        try SideChatArchive.store(root: root, profile: profile).save(archive)
+        let store = ChatStore(profile: profile, transcriptCacheRoot: root, operationsLedgerRoot: root)
+        store.selectedSessionKey = key
+        let sideChat = try XCTUnwrap(store.sideChat, "Real Side chat restored from the archive")
+        XCTAssertEqual(sideChat.sessionKey, sideKey)
+        XCTAssertFalse(store.isSideChatPresented)
+        let turn = 1_784_600_000_000.0
+        store.installOfflineDiagnosticTranscript([
+            ChatMessage(id: "u", role: "user", blocks: [ChatContentBlock(type: "text", text: "Make the chat list clearer.",
+                thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: turn - 60_000),
+            ChatMessage(id: "a", role: "assistant", blocks: [ChatContentBlock(type: "text", text: "Done; the files are attached.",
+                thinking: nil, name: nil, mimeType: nil, fileName: nil)], timestamp: turn),
+        ])
+        let host = NSHostingView(rootView: SharedInspectorFixture(store: store))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.contentView = nil; try? FileManager.default.removeItem(at: root) }
+        try await Task.sleep(for: .milliseconds(500))
+        // Cold ledger insertion after first paint: the card appears for the latest turn.
+        store.installDeliverablesForTesting([
+            Deliverable(id: "f1", sessionKey: key, messageID: "a", title: "chat-states.png", target: "artifact:f1",
+                        kind: "Image", sharedAt: turn, artifactID: "f1", sizeBytes: 40_000, mimeType: "image/png"),
+        ])
+        try await Task.sleep(for: .milliseconds(400))
+        let initial = window.frame.size
+        // Largest inspectorColumnWidth max across both occupants of the shared slot (SideChatInspector).
+        let inspectorColumnMax: CGFloat = 560
+        var previous = initial
+        var sizeChanges: [String] = []
+        func checkFrame(_ step: String) {
+            let size = window.frame.size
+            print("CAST_INSPECTOR_FRAME step=\(step) frame=\(size) result=\(store.isResultReviewPresented) side=\(store.isSideChatPresented)")
+            XCTAssertEqual(size.height, initial.height, accuracy: 1, "Inspector changes must not change window height (\(step))")
+            XCTAssertGreaterThanOrEqual(size.width, initial.width - 1, "Inspector changes must not shrink the window (\(step))")
+            XCTAssertLessThanOrEqual(size.width - initial.width, inspectorColumnMax + 1,
+                                     "Any expansion is bounded by one inspector column (\(step))")
+            if abs(size.width - previous.width) > 1 || abs(size.height - previous.height) > 1 {
+                sizeChanges.append("\(step): \(previous) -> \(size)")
+            }
+            previous = size
+        }
+        func capture(_ name: String) {
+            guard let dir = ProcessInfo.processInfo.environment["CAST_FIXTURE_OUTPUT"],
+                  let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+        }
+        capture("mac-real-chatview-card.png")
+        checkFrame("initial")
+        for cycle in 0..<3 {
+            store.presentResultReview()
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertTrue(store.isResultReviewPresented)
+            XCTAssertFalse(store.isSideChatPresented)
+            if cycle == 0 { capture("mac-real-inspector-result.png") }
+            checkFrame("cycle\(cycle)-result")
+            store.isSideChatPresented = true
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertTrue(store.isSideChatPresented)
+            XCTAssertFalse(store.isResultReviewPresented, "Side chat replaces Result review in the one inspector")
+            XCTAssertEqual(store.sideChat?.sessionKey, sideKey, "The real Side chat occupies the slot")
+            if cycle == 0 { capture("mac-real-inspector-sidechat.png") }
+            checkFrame("cycle\(cycle)-sidechat")
+            store.presentResultReview()
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertTrue(store.isResultReviewPresented)
+            XCTAssertFalse(store.isSideChatPresented, "Result review replaces Side chat")
+            checkFrame("cycle\(cycle)-result-again")
+            store.presentResultReview(false)
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertFalse(store.isResultReviewPresented)
+            XCTAssertFalse(store.isSideChatPresented)
+            checkFrame("cycle\(cycle)-closed")
+        }
+        XCTAssertLessThanOrEqual(sizeChanges.count, 1,
+                                 "The window may expand at most once; later inspector changes must keep its size: \(sizeChanges)")
+        print("CAST_INSPECTOR_FRAME summary initial=\(initial) final=\(window.frame.size) changes=\(sizeChanges)")
+        // Reviewing ends the in-chat card.
+        store.markDeliverablesReviewed(["f1"])
+        XCTAssertEqual(store.resultArtifactCounts(for: key)?.unreviewed, 0)
+        try await Task.sleep(for: .milliseconds(300))
+        capture("mac-real-chatview-after-review.png")
+    }
+
     @MainActor
     func testComposerSendsAndSidebarPreserveManuallyResizedWindow() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

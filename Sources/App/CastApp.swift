@@ -67,6 +67,13 @@ struct CastApp: App {
             } else {
                 self.normalContent
             }
+            #elseif DEBUG
+            // Offline visual fixture for the result-review design; never compiled into Release.
+            if let scene = ResultDesignFixture.scene(from: ProcessInfo.processInfo.environment) {
+                ResultDesignFixtureView(scene: scene)
+            } else {
+                self.normalContent
+            }
             #else
             self.normalContent
             #endif

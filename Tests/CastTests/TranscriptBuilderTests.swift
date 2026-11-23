@@ -763,6 +763,67 @@ final class TranscriptWindowTests: XCTestCase {
         XCTAssertEqual(window.selection(totalItemCount: 8).range, 5..<8)
     }
 
+    func testDefaultWindowOpensAtFullSizeSoLazyTranscriptsAreUnchanged() {
+        var window = TranscriptWindow()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        XCTAssertFalse(window.needsStagedGrowth)
+        window.resetForFirstPaint()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        XCTAssertFalse(window.growTowardInitialWindow())
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+    }
+
+    func testEagerWindowPaintsTheTailFirstThenGrowsInBoundedSteps() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.eagerFirstPaintItemCount)
+        XCTAssertEqual(
+            window.selection(totalItemCount: 1_000).range,
+            (1_000 - TranscriptWindow.eagerFirstPaintItemCount)..<1_000,
+            "The first paint is the newest rows")
+        var sizes = [window.requestedItemCount]
+        while window.growTowardInitialWindow() { sizes.append(window.requestedItemCount) }
+        sizes.append(window.requestedItemCount)
+        XCTAssertEqual(sizes.last, TranscriptWindow.defaultInitialItemCount)
+        for (smaller, larger) in zip(sizes, sizes.dropFirst()) {
+            XCTAssertGreaterThan(larger, smaller)
+            XCTAssertLessThanOrEqual(larger - smaller, TranscriptWindow.eagerStagedGrowthItemCount)
+        }
+        XCTAssertFalse(window.needsStagedGrowth)
+        XCTAssertFalse(window.growTowardInitialWindow(), "Growth stops at the normal window")
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+    }
+
+    func testResetNeverJumpsAStagedWindowToFullSize() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        window.growTowardInitialWindow()
+        let partial = window.requestedItemCount
+        window.reset()
+        XCTAssertEqual(window.requestedItemCount, partial, "Resuming the tail must not build 200 rows at once")
+        XCTAssertTrue(window.needsStagedGrowth)
+
+        while window.growTowardInitialWindow() {}
+        window.showEarlier(totalItemCount: 1_000)
+        XCTAssertEqual(window.requestedItemCount, 400)
+        XCTAssertFalse(window.growTowardInitialWindow(), "Growth never shrinks or extends a reader's expansion")
+        XCTAssertEqual(window.requestedItemCount, 400)
+        window.reset()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.defaultInitialItemCount)
+        window.resetForFirstPaint()
+        XCTAssertEqual(window.requestedItemCount, TranscriptWindow.eagerFirstPaintItemCount)
+    }
+
+    func testShowEarlierDuringStagedGrowthExpandsFromTheRowsOnScreen() {
+        var window = TranscriptWindow.stagedForEagerRendering()
+        let first = window.selection(totalItemCount: 1_000)
+        window.showEarlier(totalItemCount: 1_000, anchoredStartIndex: first.range.lowerBound)
+        XCTAssertFalse(window.needsStagedGrowth)
+        let expanded = window.selection(totalItemCount: 1_000)
+        XCTAssertEqual(expanded.range.upperBound, 1_000)
+        XCTAssertEqual(
+            expanded.visibleItemCount,
+            TranscriptWindow.eagerFirstPaintItemCount + TranscriptWindow.defaultExpansionItemCount)
+    }
+
     func testCountsAreSanitizedAndSelectionHandlesEmptyInput() {
         let window = TranscriptWindow(initialItemCount: 0, expansionItemCount: -5)
         let empty = window.selection(totalItemCount: -10)
@@ -934,6 +995,45 @@ final class TranscriptRealtimeLayoutTests: XCTestCase {
             XCTAssertLessThanOrEqual(document.bounds.maxY - scroll.documentVisibleRect.maxY, 2,
                                      "New reply \(count) must be visible without clicking Latest")
         }
+    }
+}
+/// Exercise the real AppKit frame notification and clip origin, including the two
+/// reasons automatic following must stop. No SwiftUI timing threshold is relaxed.
+final class TranscriptNativeTailAnchorTests: XCTestCase {
+    @MainActor
+    func testDocumentGrowthFollowsTailButPreservesReaderAndSearchPosition() throws {
+        final class FlippedDocument: NSView { override var isFlipped: Bool { true } }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let document = FlippedDocument(frame: NSRect(x: 0, y: 0, width: 600, height: 1_000))
+        scroll.documentView = document
+        var followsLatest = true
+        var isSearching = false
+        let anchor = TranscriptTailAnchor.AnchorView { followsLatest && !isSearching }
+        document.addSubview(anchor)
+        anchor.attach()
+        document.setFrameSize(NSSize(width: 600, height: 2_000))
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, document.bounds.maxY, accuracy: 1)
+
+        followsLatest = false
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+        document.setFrameSize(NSSize(width: 600, height: 3_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 100, accuracy: 1,
+                       "Rows arriving while reading earlier messages must not pull the reader down")
+
+        followsLatest = true
+        isSearching = true
+        document.setFrameSize(NSSize(width: 600, height: 4_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 100, accuracy: 1,
+                       "Search owns the visible position even if follow intent was retained")
+
+        isSearching = false
+        anchor.attach()
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, document.bounds.maxY, accuracy: 1)
+        anchor.stop()
+        let stoppedOrigin = scroll.contentView.bounds.origin.y
+        document.setFrameSize(NSSize(width: 600, height: 5_000))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, stoppedOrigin, accuracy: 1,
+                       "Dismantled observers must not move their former transcript")
     }
 }
 #endif

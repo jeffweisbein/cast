@@ -15,31 +15,34 @@ living in a browser tab or terminal.
 
 ## Downloads
 
-**[Download Cast for Mac](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/Cast-0.4.0-preview.3-macOS-arm64.zip)** ·
-[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.3) ·
-[SHA-256 checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.3/SHA256SUMS-preview3.txt)
+**[Download Cast for Mac](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.4/Cast-0.4.0-preview.4-macOS-arm64.zip)** ·
+[Release notes](https://github.com/jeffweisbein/cast/releases/tag/v0.4.0-preview.4) ·
+[SHA-256 checksums](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.4/SHA256SUMS-preview4.txt)
 
 | Platform | Available now |
 | --- | --- |
-| **Mac — Apple Silicon, macOS 15+** | Signed and Apple-notarized **0.4.0 (11)** developer preview. Download the ZIP above, unzip, then move Cast.app to Applications. |
+| **Mac — Apple Silicon, macOS 15+** | Signed and Apple-notarized **0.4.0 (17)** developer preview. Download the ZIP above, unzip, then move Cast.app to Applications. |
 | **iPhone / iPad — iOS 26+** | [Build and sign with Xcode](CONTRIBUTING.md). No public TestFlight or App Store download yet. |
 
 Cast needs a running OpenClaw gateway you control; it does not include hosted AI access
 or a gateway. See [Requirements](#requirements).
 
-Prefer to build it yourself? [Download the source preview](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/Cast-v0.4.0-preview.2-source.zip)
-([source checksum](https://github.com/jeffweisbein/cast/releases/download/v0.4.0-preview.2/SHA256SUMS))
-or browse [all releases](https://github.com/jeffweisbein/cast/releases). The source ZIP is not
-an installable app; building requires Xcode 26.3 or newer and XcodeGen.
+The public Mac download is preview 4. The source on `main` also includes the newer
+navigation, results and compact typing improvements; these are not yet included in a new
+public binary release.
 
-> **Developer preview:** Expect rough edges and gateway-version differences. Automatic app
-> updates are not configured yet; download new releases manually.
+Prefer to build the current source? [Download main](https://github.com/jeffweisbein/cast/archive/refs/heads/main.zip)
+or follow the [build instructions](CONTRIBUTING.md). The source ZIP is not an installable
+app; building requires Xcode 26.3 or newer and XcodeGen.
 
 ## What Cast does
 
 - Connects directly to one or more OpenClaw gateways
 - Organizes human chats, agent sessions, tasks, and automation
 - Streams answers and structured agent activity in real time
+- Shows conversation work states, in-chat result cards, and a focused result-review inspector
+- Reuses prepared conversations and renders the newest messages first for faster Mac chat switching
+- Keeps the latest message visible during transcript expansion, including on macOS 15
 - Syncs authoritative unread state and shows native macOS Dock badges
 - Searches conversations and keeps local media/link libraries
 - Accepts text, URLs, images, and files through the iOS Share Extension
@@ -52,6 +55,11 @@ an installable app; building requires Xcode 26.3 or newer and XcodeGen.
 - **Needs you** collects approvals, blockers, failures, and results awaiting review.
 - **Deliverables** keeps report, ZIP, PR, and release references across restarts. Refresh gateway attachments to discover, download, preview, save, or share generated files.
 - **Status & updates** shows gateway compatibility, the installed version, conversation recovery, unconfirmed sends, and recent failures.
+
+Result cards keep a completed response and its available artifacts together in the chat.
+Open a result to review its details without replacing the conversation. Work-state labels
+reflect the evidence available from the gateway; they do not turn an unavailable status
+into a claim of completion. See [current source changes](docs/preview5.md).
 
 Click the model below the composer to choose a model and reasoning effort for that conversation.
 See the [Continuity guide](docs/continuity.md) and [Session diagnostics](docs/session-diagnostics.md).

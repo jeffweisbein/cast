@@ -32,6 +32,32 @@ enum TranscriptLayoutStrategy: String, CaseIterable {
     var usesWindowedTranscript: Bool { true }
 }
 
+/// When an eager transcript may spend main-thread time growing its window.
+@MainActor
+enum TranscriptGrowthPacing {
+    static let idleSecondsBeforeGrowth: Double = 0.5
+    static let stepIntervalMilliseconds = 60
+    static let busyPollMilliseconds = 150
+
+    #if DEBUG
+    // Test instrumentation: responsiveness alone cannot identify the end of staging.
+    // Absent from release builds and never used to decide production behavior.
+    static var didGrowWindow: ((String?, Int) -> Void)?
+    #endif
+
+    /// Seconds since the reader last used the keyboard, mouse or trackpad. Replaceable so
+    /// tests neither depend on nor are disturbed by whoever is using the machine.
+    static var secondsSinceUserInput: () -> Double = {
+        #if os(macOS)
+        // `~0` is the documented "any input event" selector for this query.
+        guard let anyInput = CGEventType(rawValue: ~0) else { return .infinity }
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+        #else
+        return .infinity
+        #endif
+    }
+}
+
 struct ChatView: View {
     let store: ChatStore
     @Environment(\.scenePhase) private var scenePhase
@@ -45,12 +71,20 @@ struct ChatView: View {
     @State private var showingLibrary = false
     @State private var showingSecretRequests = false
     @State private var showingQuestions = false
+    @State private var showingApprovals = false
     @State private var previewURL: URL?
     @State private var documentLink: DocumentLink?
     @State private var nearBottom = true
     @State private var atBottom = true
     @State private var followState = TranscriptFollowState()
-    @State private var transcriptWindow = TranscriptWindow()
+    /// Eager transcripts (macOS) open on a small first-paint window and grow it in steps;
+    /// see `stagedWindowGrowth`. Lazy transcripts keep the full window from the start.
+    @State private var transcriptWindow: TranscriptWindow
+    /// The conversation `transcriptWindow` was last reset for. `onChange` runs only after
+    /// the body has already been evaluated for a new selection, and a cached conversation
+    /// publishes its rows in that same update — so the stored window alone would build the
+    /// previous chat's full-size window for the new chat before being reset.
+    @State private var transcriptWindowSessionKey: String?
     @State private var readingWindowStartID: String?
     @State private var readingWindowEndID: String?
     @State private var focusedSearchItemID: String?
@@ -73,6 +107,17 @@ struct ChatView: View {
     @State private var needsForegroundReanchor = false
     static let reanchorAttemptLimit = 3
     @FocusState private var composerFocused: Bool
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @State private var softwareKeyboardVisible = false
+    #endif
+    private var usesShortLayout: Bool {
+        #if os(iOS)
+        verticalSizeClass == .compact || softwareKeyboardVisible
+        #else
+        false
+        #endif
+    }
 
     init(
         store: ChatStore,
@@ -86,14 +131,33 @@ struct ChatView: View {
         self.allowsSending = allowsSending
         self.showsComposer = showsComposer
         self._showingSideChat = showingSideChat
+        self._transcriptWindow = State(initialValue: layoutStrategy.usesLazyTranscript
+            ? TranscriptWindow()
+            : TranscriptWindow.stagedForEagerRendering())
     }
 
     private var items: [TranscriptItem] {
         self.store.transcriptItems(showAgentWork: self.showAgentWork)
     }
 
+    /// The window for the conversation on screen right now. Until `onChange` has caught up
+    /// with a new selection this is a first-paint window, never the previous chat's.
+    private var currentTranscriptWindow: TranscriptWindow {
+        guard self.transcriptWindowSessionKey != self.store.selectedSessionKey else {
+            return self.transcriptWindow
+        }
+        var fresh = self.transcriptWindow
+        fresh.resetForFirstPaint()
+        return fresh
+    }
+
+    private func restartTranscriptWindow() {
+        self.transcriptWindow.resetForFirstPaint()
+        self.transcriptWindowSessionKey = self.store.selectedSessionKey
+    }
+
     private var windowSelection: TranscriptWindowSelection {
-        self.transcriptWindow.selection(
+        self.currentTranscriptWindow.selection(
             totalItemCount: self.items.count,
             anchoredStartIndex: self.readingWindowStartID.flatMap { id in
                 self.items.firstIndex { $0.id == id }
@@ -230,6 +294,11 @@ struct ChatView: View {
                     }
                 }
         }
+        // Its own view: deliverable/progress observation stays out of this body. Placed
+        // before approvals and questions so anything that needs the user stays nearest the
+        // composer.
+        ChatResultCard(store: self.store) { self.store.presentResultReview() }
+            .id("result-card")
         if self.showAgentWork {
             ForEach(self.store.approvals) { approval in
                 ApprovalCardView(approval: approval, store: self.store)
@@ -259,11 +328,17 @@ struct ChatView: View {
         ScrollView {
             self.transcriptStack
             .scrollTargetLayout()
+            #if os(macOS)
+            .background(TranscriptTailAnchor {
+                self.followState.followsLatest && self.focusedSearchItemID == nil
+            })
+            #endif
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
+        .accessibilityIdentifier("chat-transcript")
         .scrollPosition(self.$scrollPosition)
         .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.1) { ids in
             let visible = Set(ids)
@@ -366,8 +441,68 @@ struct ChatView: View {
                    active: store.isAgentTurnActive)
     }
 
+    /// Everything that decides whether the first-paint window may keep growing. The task
+    /// below is keyed on it, so selecting another conversation, scrolling away from the
+    /// tail or starting a search cancels the growth in flight instead of racing it.
+    private struct WindowGrowthTrigger: Equatable {
+        let sessionKey: String?
+        let needsGrowth: Bool
+        let followsLatest: Bool
+        let isSearching: Bool
+        let hasItems: Bool
+    }
+
+    private var windowGrowthTrigger: WindowGrowthTrigger {
+        WindowGrowthTrigger(
+            sessionKey: self.store.selectedSessionKey,
+            needsGrowth: self.currentTranscriptWindow.needsStagedGrowth,
+            followsLatest: self.followState.followsLatest,
+            isSearching: self.focusedSearchItemID != nil,
+            // A cold open publishes an empty transcript first. Growing against it would
+            // spend the staging before the rows that need it arrive.
+            hasItems: !self.items.isEmpty)
+    }
+
+    /// Restores the normal window after the first paint, a bounded slice of rows at a time.
+    /// Each slice is real main-thread work, so it is spent only while the reader is not
+    /// touching the Mac: rapid switching never pays for it, and a reader who starts typing
+    /// or scrolling waits for at most the slice already in flight. Runs only while the
+    /// reader follows the tail: the bottom scroll anchor absorbs rows added above the
+    /// viewport, so growth is invisible. Scrolling up pins the window as before and offers
+    /// Show Earlier.
+    private func stagedWindowGrowth(_ trigger: WindowGrowthTrigger) async {
+        guard trigger.needsGrowth, trigger.followsLatest, !trigger.isSearching, trigger.hasItems
+        else { return }
+        while !Task.isCancelled {
+            let idle = TranscriptGrowthPacing.secondsSinceUserInput()
+                >= TranscriptGrowthPacing.idleSecondsBeforeGrowth
+            try? await Task.sleep(for: .milliseconds(idle
+                ? TranscriptGrowthPacing.stepIntervalMilliseconds
+                : TranscriptGrowthPacing.busyPollMilliseconds))
+            guard !Task.isCancelled,
+                  self.store.selectedSessionKey == trigger.sessionKey,
+                  self.transcriptWindowSessionKey == trigger.sessionKey,
+                  self.followState.followsLatest,
+                  self.focusedSearchItemID == nil
+            else { return }
+            // Re-read after the sleep: input that arrived meanwhile postpones the slice.
+            guard TranscriptGrowthPacing.secondsSinceUserInput()
+                >= TranscriptGrowthPacing.idleSecondsBeforeGrowth
+            else { continue }
+            let hasMore = self.transcriptWindow.growTowardInitialWindow()
+            #if DEBUG
+            TranscriptGrowthPacing.didGrowWindow?(
+                trigger.sessionKey, self.transcriptWindow.requestedItemCount)
+            #endif
+            guard hasMore else { return }
+        }
+    }
+
     private var liveTranscriptBody: some View {
         self.transcriptScrollBody
+        .task(id: self.windowGrowthTrigger) {
+            await self.stagedWindowGrowth(self.windowGrowthTrigger)
+        }
         .task(id: self.tailUpdate) {
             let sessionKey = self.store.selectedSessionKey
             guard self.followState.followsLatest, self.focusedSearchItemID == nil else { return }
@@ -466,7 +601,7 @@ struct ChatView: View {
             CastLifecycleDiagnostics.composerFocusChanged(focused: focused)
             // Same shape as the attachment case: the keyboard shrinks the scroll view's real
             // frame, so without this the newest row slides out of view and stays there.
-            guard focused, self.followState.followsLatest else { return }
+            guard self.followState.followsLatest else { return }
             self.scrollToBottom(animated: false)
         }
         .onChange(of: self.store.selectedSessionKey) {
@@ -475,13 +610,13 @@ struct ChatView: View {
             self.followState.resume()
             self.followAnchorID = nil
             self.reanchorAttempts = 0
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             self.scrollToBottom(animated: false)
         }
         .onChange(of: self.showAgentWork) {
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             if self.followState.followsLatest {
@@ -496,7 +631,7 @@ struct ChatView: View {
             self.followState.resume()
             self.followAnchorID = nil
             self.reanchorAttempts = 0
-            self.transcriptWindow.reset()
+            self.restartTranscriptWindow()
             self.readingWindowStartID = nil
             self.readingWindowEndID = nil
             self.lastTailID = self.store.messages.last?.id
@@ -520,12 +655,25 @@ struct ChatView: View {
         } else if self.layoutStrategy.usesDetachedComposer {
             VStack(spacing: 0) {
                 self.transcriptView
-                ProgressCardView(store: self.store)
+                if !self.usesShortLayout { ProgressCardView(store: self.store) }
                 Composer(
                     store: self.store,
                     allowsSending: self.allowsSending,
                     focused: self.$composerFocused)
                     .equatable()
+                    .layoutPriority(1)
+                    #if os(iOS)
+                    // The attachment tray, import tiles and a growing draft all change the
+                    // detached composer's height, which shrinks the transcript's real frame.
+                    // Attachment count alone misses a tray that appears for an import still
+                    // being prepared, so follow the height itself.
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height.rounded()
+                    } action: { _ in
+                        guard self.followState.followsLatest else { return }
+                        self.scrollToBottom(animated: false)
+                    }
+                    #endif
             }
         } else {
             self.transcriptView
@@ -545,6 +693,30 @@ struct ChatView: View {
     var body: some View {
         self.transcriptAndComposer
         .toolbar {
+            #if os(iOS)
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Hide keyboard", systemImage: "keyboard.chevron.compact.down") { self.composerFocused = false }
+                    if store.sideChat != nil {
+                        Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
+                    }
+                    Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true }
+                    Button("Secure entry", systemImage: "key") { showingSecretRequests = true }
+                    Divider()
+                    Button("Find in chat", systemImage: "magnifyingglass") { showingFind.toggle() }
+                    Button("Library", systemImage: "photo.on.rectangle.angled") { showingLibrary = true }
+                    Button("Result", systemImage: "doc.text.magnifyingglass") {
+                        store.presentResultReview(!store.isResultReviewPresented)
+                    }
+                    .accessibilityIdentifier("result-review-toggle")
+                    Toggle("Show agent's work", isOn: self.$showAgentWork)
+                } label: {
+                    Label("Chat actions", systemImage: "ellipsis")
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityIdentifier("chat-actions-menu")
+            }
+            #else
             ToolbarItem {
                 if store.sideChat != nil {
                     Button("Side chat", systemImage: "bubble.left.and.bubble.right") { showingSideChat.toggle() }
@@ -552,6 +724,22 @@ struct ChatView: View {
             }
             ToolbarItem { Button("Questions", systemImage: "questionmark.bubble") { showingQuestions = true } }
             ToolbarItem { Button("Secure entry", systemImage: "key") { showingSecretRequests = true } }
+            #endif
+        }
+        .sheet(isPresented: $showingApprovals) {
+            NavigationStack {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            let pending = store.approvals.filter { !$0.isExpired }
+                            if pending.isEmpty { Text("No approvals waiting in this workspace.").foregroundStyle(.secondary) }
+                            ForEach(pending) { ApprovalCardView(approval: $0, store: store) }
+                        }
+                    }.padding()
+                }
+                .navigationTitle("Approvals")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingApprovals = false } } }
+            }
         }
         .sheet(isPresented: $showingQuestions) { QuestionInboxView(store: store) }
         .sheet(isPresented: $showingSecretRequests) { SecretRequestsView(store: store) }
@@ -565,11 +753,17 @@ struct ChatView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
             #if os(iOS)
-            ConnectionStatusView(store: store, showsWhenHealthy: false)
+            ConnectionStatusView(store: store, showsWhenHealthy: false, compact: self.usesShortLayout)
             #else
             ConnectionStatusView(store: store)
             #endif
-            navigationControls
+            if !self.usesShortLayout || self.showingFind { navigationControls }
+            #if os(iOS)
+            PendingAttentionControl(store: store, showingQuestions: $showingQuestions,
+                                 showingApprovals: $showingApprovals, showingSecretRequests: $showingSecretRequests)
+                .equatable()
+            #else
+            if !self.usesShortLayout {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
                 if !pending.isEmpty {
@@ -582,6 +776,8 @@ struct ChatView: View {
                     .padding(8).frame(maxWidth: .infinity).background(.regularMaterial)
             }
 
+            }
+            #endif
             if focusedSearchItemID != nil {
                 HStack {
                     Text("Viewing another part of the conversation").font(.caption)
@@ -610,10 +806,23 @@ struct ChatView: View {
             }
             .background(Theme.canvas)
         }
+        #if os(iOS)
+        .background {
+            DockedKeyboardReader { self.softwareKeyboardVisible = $0 }
+                .ignoresSafeArea(.keyboard)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onChange(of: self.usesShortLayout) { _, _ in
+            guard self.followState.followsLatest else { return }
+            self.scrollToBottom(animated: false)
+        }
+        #endif
         .navigationTitle(self.title)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Menu {
@@ -633,7 +842,17 @@ struct ChatView: View {
                 }
                 .help("Media and links from this chat")
             }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    self.store.presentResultReview(!self.store.isResultReviewPresented)
+                } label: {
+                    Label("Result", systemImage: "doc.text.magnifyingglass")
+                }
+                .help(self.store.isResultReviewPresented ? "Hide result review" : "Review this chat's files, progress and details")
+                .accessibilityIdentifier("result-review-toggle")
+            }
         }
+        #endif
         .sheet(isPresented: self.$showingLibrary) {
             LibraryView(store: self.store)
         }
@@ -926,6 +1145,108 @@ struct StreamingView: View {
     }
 }
 
+#if os(iOS)
+/// Keep pending work discoverable without a keyboard-anchored native menu.
+private struct PendingAttentionControl: View, Equatable {
+    let store: ChatStore
+    let storeIdentity: ObjectIdentifier
+    @Binding var showingQuestions: Bool
+    @Binding var showingApprovals: Bool
+    @Binding var showingSecretRequests: Bool
+    @State private var attentionDate = Date.now
+    @State private var showingOptions = false
+    @State private var destination: Destination?
+    private enum Destination { case questions, approvals, secure }
+
+    init(store: ChatStore, showingQuestions: Binding<Bool>, showingApprovals: Binding<Bool>, showingSecretRequests: Binding<Bool>) {
+        self.store = store
+        self.storeIdentity = ObjectIdentifier(store)
+        self._showingQuestions = showingQuestions
+        self._showingApprovals = showingApprovals
+        self._showingSecretRequests = showingSecretRequests
+    }
+
+    // These bindings only deliver actions to this stable parent; their values don't
+    // determine this row. Store observation and local expiry state still invalidate it.
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.storeIdentity == rhs.storeIdentity }
+
+    private struct Summary: Equatable {
+        let questions: Int
+        let approvals: Int
+        let secure: Bool
+        var total: Int { questions + approvals + (secure ? 1 : 0) }
+    }
+
+    private func summary(at date: Date) -> Summary {
+        Summary(questions: store.questionInbox.sorted.filter { $0.request.isPending(at: date) }.count,
+                approvals: store.approvals.filter { ($0.expiresAtMs ?? .greatestFiniteMagnitude) > date.timeIntervalSince1970 * 1000 }.count,
+                secure: store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) })
+    }
+
+    var body: some View {
+        let pending = summary(at: attentionDate)
+        Group {
+            if pending.total > 0 {
+                Button { showingOptions = true } label: {
+                    Label("Needs you (\(pending.total))", systemImage: "exclamationmark.bubble")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("chat-pending-attention-menu")
+                .accessibilityValue("\(pending.questions) questions, \(pending.approvals) approvals" + (pending.secure ? ", secure entry requested" : ""))
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial)
+            }
+        }
+        .sheet(isPresented: $showingOptions, onDismiss: {
+            // Route only after the chooser has finished dismissing, so it never
+            // competes with the destination sheet for the same presentation.
+            let selected = destination
+            destination = nil
+            switch selected {
+            case .questions: showingQuestions = true
+            case .approvals: showingApprovals = true
+            case .secure: showingSecretRequests = true
+            case nil: break
+            }
+        }) {
+            NavigationStack {
+                List {
+                    let current = summary(at: attentionDate)
+                    if current.questions > 0 {
+                        Button("\(current.questions) question\(current.questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") {
+                            destination = .questions; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-questions")
+                    }
+                    if current.approvals > 0 {
+                        Button("\(current.approvals) approval\(current.approvals == 1 ? "" : "s")", systemImage: "checkmark.shield") {
+                            destination = .approvals; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-approvals")
+                    }
+                    if current.secure {
+                        Button("Secure entry requested", systemImage: "lock.fill") {
+                            destination = .secure; showingOptions = false
+                        }.accessibilityIdentifier("chat-pending-secure-entry")
+                    }
+                    if current.total == 0 { Text("Nothing waiting for you.").foregroundStyle(.secondary) }
+                }
+                .navigationTitle("Needs you")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingOptions = false } } }
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                let now = Date.now
+                if summary(at: now) != summary(at: attentionDate) { attentionDate = now }
+            }
+        }
+    }
+}
+#endif
+
 struct Composer: View, Equatable {
     let store: ChatStore
     var allowsSending = true
@@ -934,6 +1255,12 @@ struct Composer: View, Equatable {
     @FocusState.Binding var focused: Bool
     @State private var model: ComposerModel
     private let storeIdentity: ObjectIdentifier
+    /// Snapshot focus for Equatable: comparing the live Binding on both sides reads the
+    /// same new value and can suppress the update that dismisses the field's keyboard.
+    private let focusSnapshot: Bool
+    /// Imports chosen but not yet attached. Owned per store rather than per view, so it
+    /// survives leaving and reopening a conversation.
+    private let imports: ComposerImportQueue
     @State private var draft = ""
     @State private var importing = false
     @State private var importTarget: ChatStore.AttachmentDraftTarget?
@@ -961,26 +1288,44 @@ struct Composer: View, Equatable {
         self.store = store
         self.allowsSending = allowsSending
         self._focused = focused
+        self.focusSnapshot = focused.wrappedValue
         self._model = State(wrappedValue: ComposerModel(store: store))
         self.storeIdentity = ObjectIdentifier(store)
+        self.imports = ComposerImportQueue.queue(for: store)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.storeIdentity == rhs.storeIdentity && lhs.allowsSending == rhs.allowsSending
+            && lhs.focusSnapshot == rhs.focusSnapshot
     }
     #if os(iOS)
+    @Environment(\.verticalSizeClass) private var composerVerticalSizeClass
+    @Environment(\.dynamicTypeSize) private var composerDynamicTypeSize
     @State private var sendPulse = 0
     @State private var showingPhotos = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
-    @State private var importingMedia = false
-    @State private var mediaImportID = UUID()
-    @State private var photoImportTask: Task<Void, Never>?
+    /// The draft the photo picker was opened for. Like `importTarget` for files, it is
+    /// captured before the picker appears so a selection change behind the picker cannot
+    /// redirect the photos.
+    @State private var photoTarget: ChatStore.AttachmentDraftTarget?
+    /// Whether the keyboard should come back when the model sheet closes.
+    @State private var refocusAfterModelSheet = false
     #endif
 
     private var sendDisabled: Bool {
-        !self.allowsSending || self.dictation.phase != .idle
+        !self.allowsSending || self.dictation.phase != .idle || self.waitingForImports
             || (self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && self.model.pendingAttachments.isEmpty)
+    }
+
+    /// An import for this draft is still being prepared. Sending now would let it land in the
+    /// draft after its message had gone, so every send path waits (button, Return, voice).
+    private var waitingForImports: Bool {
+        #if os(iOS)
+        self.imports.hasPreparing(for: self.store.attachmentDraftTarget)
+        #else
+        false
+        #endif
     }
 
     #if os(macOS)
@@ -1000,8 +1345,10 @@ struct Composer: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             self.inputCard
+            #if os(macOS)
             ComposerModelIndicator(store: self.store)
                 .padding(.horizontal, 16)
+            #endif
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
@@ -1084,19 +1431,15 @@ struct Composer: View, Equatable {
         .onChange(of: self.selectedPhotos) { _, items in
             guard !items.isEmpty else { return }
             self.selectedPhotos = []
-            self.photoImportTask?.cancel()
-            let target = self.store.attachmentDraftTarget
-            let importID = UUID()
-            self.mediaImportID = importID
-            self.photoImportTask = Task { await self.importPhotos(items, target: target, importID: importID) }
-        }
-        .onChange(of: self.model.selectedSessionKey) { _, _ in
-            self.photoImportTask?.cancel()
-            self.photoImportTask = nil
-        }
-        .onDisappear {
-            self.photoImportTask?.cancel()
-            self.photoImportTask = nil
+            let target = self.photoTarget ?? self.store.attachmentDraftTarget
+            self.photoTarget = nil
+            self.imports.clearFailures(for: target)
+            let importID = self.imports.begin(
+                title: items.count == 1 ? "Photo or video" : "\(items.count) photos and videos",
+                symbol: "photo",
+                target: target)
+            let task = Task { await self.importPhotos(items, target: target, importID: importID) }
+            self.imports.attach(task, to: importID)
         }
         #endif
         .fileImporter(
@@ -1107,7 +1450,11 @@ struct Composer: View, Equatable {
             let target = self.importTarget
             self.importTarget = nil
             if case let .success(urls) = result, let target {
+                #if os(iOS)
+                self.importFiles(urls, target: target)
+                #else
                 for url in urls { self.store.addAttachment(url: url, target: target) }
+                #endif
             } else if case let .failure(error) = result { self.store.showError(error.localizedDescription) }
         }
         .confirmationDialog(
@@ -1136,6 +1483,188 @@ struct Composer: View, Equatable {
         }
     }
 
+    private var dictationStatusRow: some View {
+        HStack {
+            if self.dictation.phase == .recording { Image(systemName: "record.circle").foregroundStyle(.red) }
+            else { ProgressView().controlSize(.small) }
+            Text(self.dictation.status).font(.caption)
+            Spacer()
+            if self.dictation.phase == .recording { Button("Finish") { self.dictation.finish() } }
+            Button("Cancel") { self.dictation.cancel() }
+        }.padding(.horizontal, 12).padding(.top, 8)
+    }
+
+    #if os(iOS)
+    /// Two rows inside one card: the message on top, every control on the bottom edge where
+    /// a thumb already is. Attachments, imports and the external-delivery state sit above
+    /// the message and take no space when there is nothing to show.
+    private var inputCard: some View {
+        let target = self.store.attachmentDraftTarget
+        let capturing = self.voiceRecorder.isCapturing
+        return VStack(alignment: .leading, spacing: 0) {
+            ComposerAttachmentTray(
+                attachments: self.model.pendingAttachments,
+                imports: self.imports.items(for: target),
+                upload: self.store.currentUploadProgress,
+                deliversExternally: self.model.deliverExternally,
+                onRemove: { self.store.removeAttachment(id: $0.id) },
+                onCancelImport: { self.imports.cancel($0) },
+                onCancelUpload: { self.store.cancelCurrentUploads() },
+                onDisableExternalDelivery: { self.store.deliverExternally = false })
+            if self.dictation.phase != .idle {
+                self.dictationStatusRow
+            }
+            if self.voiceRecorder.stoppedAtLimit, case .preview = self.voiceRecorder.state {
+                VoiceLimitNotice()
+                    .padding(.top, 8)
+            }
+            if case let .preview(recording) = self.voiceRecorder.state {
+                VoicePreviewRow(
+                    recording: recording,
+                    onDelete: { self.voiceRecorder.cancel() },
+                    onSend: { self.sendVoiceMessage() })
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+            } else {
+                Group {
+                    if capturing {
+                        VoiceRecordingIndicator(controller: self.voiceRecorder)
+                    } else {
+                        self.messageField
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                HStack(spacing: 2) {
+                    self.addMenu
+                        .opacity(capturing ? 0 : 1)
+                        .allowsHitTesting(!capturing)
+                        .accessibilityHidden(capturing)
+                    ComposerModelIndicator(store: self.store, style: .toolbar) { presented in
+                        self.modelSheetPresentationChanged(presented)
+                    }
+                    .opacity(capturing ? 0 : 1)
+                    .allowsHitTesting(!capturing)
+                    .accessibilityHidden(capturing)
+                    Spacer(minLength: 0)
+                    Button { self.focused = false } label: {
+                        Image(systemName: "keyboard.chevron.compact.down")
+                            .font(.system(size: 19))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(!self.focused)
+                    .opacity(capturing || !self.focused ? 0 : 1)
+                    .allowsHitTesting(!capturing && self.focused)
+                    .accessibilityHidden(capturing || !self.focused)
+                    .accessibilityLabel("Hide keyboard")
+                    .accessibilityIdentifier("composer-hide-keyboard")
+                    if self.allowsSending {
+                        // One structural slot in both states, so the in-flight hold gesture
+                        // survives the idle → recording swap of the row above.
+                        VoiceRecordButton(controller: self.voiceRecorder)
+                            .disabled(self.dictation.phase != .idle)
+                    }
+                    // Hidden rather than removed while recording: removing it would slide
+                    // the microphone sideways under the finger that is holding it.
+                    self.sendButton
+                        .opacity(capturing ? 0 : 1)
+                        .allowsHitTesting(!capturing)
+                        .accessibilityHidden(capturing)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 2)
+            }
+        }
+        .background(
+            GlassCapsule()
+                .overlay {
+                    if self.dropTargeted {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(.tint, lineWidth: 2)
+                    }
+                })
+    }
+
+    /// The single entry point for everything that can be added to a message. Only sources
+    /// this build can really attach are listed.
+    private var addMenu: some View {
+        Menu {
+            Section {
+                Button("Photos & Videos", systemImage: "photo.on.rectangle") {
+                    self.photoTarget = self.store.attachmentDraftTarget
+                    self.showingPhotos = true
+                }
+                Button("Files", systemImage: "folder") {
+                    self.importTarget = self.store.attachmentDraftTarget
+                    self.importing = true
+                }
+                Button("Paste Image", systemImage: "doc.on.clipboard") {
+                    self.importFromUIPasteboard()
+                }
+            }
+            if self.allowsSending {
+                Section {
+                    Button(
+                        self.dictation.phase == .recording ? "Finish Dictation" : "Dictate into Draft",
+                        systemImage: "waveform.badge.mic")
+                    {
+                        if self.dictation.phase == .recording { self.dictation.finish() }
+                        else if let context = self.model.selectedSessionKey { self.dictation.start(context: context) }
+                    }
+                    .disabled(self.dictation.phase == .preparing || self.dictation.phase == .transcribing)
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    Toggle(isOn: Binding(
+                        get: { self.model.deliverExternally },
+                        set: { self.store.deliverExternally = $0 }))
+                    {
+                        Label("Deliver Replies Externally", systemImage: "paperplane")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+                .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add photos, files, or options")
+        .accessibilityIdentifier("composer-add-menu")
+    }
+
+    private func modelSheetPresentationChanged(_ presented: Bool) {
+        if presented {
+            self.refocusAfterModelSheet = self.focused
+        } else if self.refocusAfterModelSheet {
+            self.refocusAfterModelSheet = false
+            self.focused = true
+        }
+    }
+
+    private var messageField: some View {
+        TextField("Message the fleet…", text: self.$draft, axis: .vertical)
+            .accessibilityIdentifier("composer-message-field")
+            .textFieldStyle(.plain)
+            .lineLimit(1 ... (self.composerVerticalSizeClass == .compact ? 2 : self.composerDynamicTypeSize.isAccessibilitySize ? 3 : 5))
+            // Keep the empty field at its intrinsic one-line height inside the
+            // detached VStack. It still grows through the line-limit range, and
+            // Dynamic Type remains free to increase each line's intrinsic height.
+            .fixedSize(horizontal: false, vertical: true)
+            .focused(self.$focused)
+            .onSubmit { self.sendDraft() }
+            .onAppear {
+                self.focused = true
+                self.installDiagnosticDraftIfRequested()
+            }
+            .padding(.vertical, 8)
+    }
+    #endif
+
+    #if os(macOS)
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let progress = self.store.currentUploadProgress {
@@ -1144,20 +1673,13 @@ struct Composer: View, Equatable {
                     Button("Cancel") { self.store.cancelCurrentUploads() }
                 }.font(.caption).padding(.horizontal, 8)
             }
-            #if os(iOS)
-            if self.importingMedia {
-                ProgressView("Preparing photos and videos…").font(.caption).padding(.horizontal, 8)
-            }
-            #endif
             if !self.model.pendingAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(self.model.pendingAttachments) { attachment in
                             AttachmentChip(attachment: attachment) {
                                 self.store.removeAttachment(id: attachment.id)
-                                #if os(macOS)
                                 if attachment.fileName == "Cast-window-context.txt" { self.desktopAccess.stop() }
-                                #endif
                             }
                         }
                     }
@@ -1166,16 +1688,8 @@ struct Composer: View, Equatable {
                 }
             }
             if self.dictation.phase != .idle {
-                HStack {
-                    if self.dictation.phase == .recording { Image(systemName: "record.circle").foregroundStyle(.red) }
-                    else { ProgressView().controlSize(.small) }
-                    Text(self.dictation.status).font(.caption)
-                    Spacer()
-                    if self.dictation.phase == .recording { Button("Finish") { self.dictation.finish() } }
-                    Button("Cancel") { self.dictation.cancel() }
-                }.padding(.horizontal, 12).padding(.top, 8)
+                self.dictationStatusRow
             }
-            #if os(macOS)
             if let window = self.desktopAccess.activeWindow {
                 HStack {
                     Image(systemName: "macwindow")
@@ -1184,7 +1698,6 @@ struct Composer: View, Equatable {
                     Button("Stop access", role: .destructive) { self.desktopAccess.stop(); if self.store.isAgentTurnActive { self.store.abortActiveRun() } }
                 }.padding(.horizontal, 12).padding(.top, 8)
             }
-            #endif
             if self.voiceRecorder.stoppedAtLimit, case .preview = self.voiceRecorder.state {
                 VoiceLimitNotice()
             }
@@ -1236,7 +1749,6 @@ struct Composer: View, Equatable {
             .help("Dictate into this draft")
             .accessibilityLabel("Dictate into draft")
             .keyboardShortcut("d", modifiers: [.command, .shift])
-            #if os(macOS)
             Menu {
                 Button("Dictation Setup…") { self.showingDictationSetup = true }
                 Button("Attach a Window…") { self.showingDesktopPicker = true }
@@ -1249,30 +1761,7 @@ struct Composer: View, Equatable {
             .padding(.vertical, 4)
             .help("Local dictation and desktop agents")
             .disabled(self.dictation.phase != .idle)
-            #endif
         }
-        #if os(iOS)
-        Menu {
-            Button(self.importingMedia ? "Preparing media…" : "Photos & Videos", systemImage: "photo.on.rectangle") {
-                self.showingPhotos = true
-            }.disabled(self.importingMedia)
-            Button("Files", systemImage: "folder") {
-                self.importTarget = self.store.attachmentDraftTarget; self.importing = true
-            }
-            Button("Paste Image", systemImage: "doc.on.clipboard") {
-                self.importFromUIPasteboard()
-            }
-        } label: {
-            Image(systemName: "paperclip")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .padding(.vertical, 4)
-        .accessibilityLabel("Attach photo or file")
-        #else
         Button { self.importTarget = self.store.attachmentDraftTarget; self.importing = true } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 15, weight: .medium))
@@ -1283,8 +1772,6 @@ struct Composer: View, Equatable {
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .accessibilityLabel("Attach image or file")
-        #endif
-        #if os(macOS)
         // NSTextView representable so we control the insets ourselves; a SwiftUI
         // placeholder overlaid at the same origin lines up 1:1 with the caret.
         // Explicit height off the draft (line count) drives the scroll container
@@ -1309,22 +1796,6 @@ struct Composer: View, Equatable {
         }
         .frame(height: self.macOSComposerHeight)
         .animation(.easeOut(duration: 0.12), value: self.macOSComposerHeight)
-        #else
-        TextField("Message the fleet…", text: self.$draft, axis: .vertical)
-            .textFieldStyle(.plain)
-            .lineLimit(1 ... 12)
-            // Keep the empty field at its intrinsic one-line height inside the
-            // detached VStack. It still grows through the line-limit range, and
-            // Dynamic Type remains free to increase each line's intrinsic height.
-            .fixedSize(horizontal: false, vertical: true)
-            .focused(self.$focused)
-            .onSubmit { self.sendDraft() }
-            .onAppear {
-                self.focused = true
-                self.installDiagnosticDraftIfRequested()
-            }
-            .padding(.vertical, 8)
-        #endif
     }
 
     @ViewBuilder
@@ -1343,6 +1814,17 @@ struct Composer: View, Equatable {
         .disabled(!self.allowsSending)
         .help(self.model.deliverExternally ? "External channel delivery enabled" : "Replies stay in Cast")
         .accessibilityLabel(self.model.deliverExternally ? "External delivery enabled" : "External delivery disabled")
+        self.sendButton
+    }
+    #endif
+
+    #if os(iOS)
+    private static let sendButtonSide: CGFloat = 34
+    #else
+    private static let sendButtonSide: CGFloat = 28
+    #endif
+
+    private var sendButton: some View {
         Button(action: self.sendDraft) {
             ZStack {
                 Circle()
@@ -1351,13 +1833,22 @@ struct Composer: View, Equatable {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(self.sendDisabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.white))
             }
-            .frame(width: 28, height: 28)
+            .frame(width: Self.sendButtonSide, height: Self.sendButtonSide)
+            #if os(iOS)
+            // The circle stays compact; the hit area meets the 44pt minimum.
+            .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget)
+            .contentShape(Rectangle())
+            #else
             .contentShape(Circle())
+            #endif
         }
         .buttonStyle(.plain)
+        #if os(macOS)
         .padding(.vertical, 4)
+        #endif
         .disabled(self.sendDisabled)
         .accessibilityLabel("Send message")
+        .accessibilityHint(self.waitingForImports ? ComposerSendGate.waitingMessage : "")
     }
 
     private func restoreDraft() {
@@ -1381,7 +1872,7 @@ struct Composer: View, Equatable {
     }
 
     private func sendDraft() {
-        guard self.allowsSending, self.dictation.phase == .idle else { return }
+        guard self.allowsSending, self.dictation.phase == .idle, !self.waitingForImports else { return }
         guard !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !self.model.pendingAttachments.isEmpty else { return }
         if self.model.deliverExternally {
             self.confirmingDelivery = true
@@ -1394,6 +1885,11 @@ struct Composer: View, Equatable {
     /// exact draft/send path images use, so frame validation and the external-delivery
     /// confirmation both still apply.
     private func sendVoiceMessage() {
+        // Keep the preview: promoting it now would strand it beside an unfinished import.
+        guard !self.waitingForImports else {
+            self.store.showError(ComposerSendGate.waitingMessage)
+            return
+        }
         do {
             let attachment = try self.voiceRecorder.makeAttachment()
             self.store.addAttachments([attachment])
@@ -1409,9 +1905,13 @@ struct Composer: View, Equatable {
     private func performSend(deliver: Bool) {
         guard self.dictation.phase == .idle else { return }
         let text = self.draft
+        #if os(iOS)
+        let target = self.store.attachmentDraftTarget
+        #endif
         guard self.store.send(text, deliver: deliver) else { return }
         self.draft = ""
         #if os(iOS)
+        self.imports.clearFailures(for: target)
         self.sendPulse += 1
         // iOS 17+ TextField(axis: .vertical) does not re-render when the binding is
         // cleared while the field is focused — the internal UITextView keeps the sent
@@ -1426,15 +1926,23 @@ struct Composer: View, Equatable {
     }
 
     #if os(iOS)
+    /// Prepares one picker selection as a single tile in the tray. The tile is the source of
+    /// truth for cancellation: once it is gone, nothing from this batch is attached.
     private func importPhotos(_ items: [PhotosPickerItem], target: ChatStore.AttachmentDraftTarget, importID: UUID) async {
         var prepared: [PreparedAttachment] = []
         var failures: [String] = []
         var committed = false
         defer { if !committed { prepared.forEach { $0.removeOwnedFile() } } }
-        self.importingMedia = true
-        defer { if self.mediaImportID == importID { self.importingMedia = false } }
+        /// Attachments already in the destination draft, when it is still the one on screen.
+        /// After a switch the store re-validates the whole batch on delivery instead.
+        func existing() -> [PreparedAttachment] {
+            self.store.attachmentDraftTarget == target ? self.model.pendingAttachments : []
+        }
         for (index, item) in items.enumerated() {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.imports.isPreparing(importID) else { return }
+            if items.count > 1 {
+                self.imports.retitle(importID, "Preparing \(index + 1) of \(items.count)")
+            }
             do {
                 if item.supportedContentTypes.contains(where: { VideoAttachments.isVideo($0) }) {
                     guard let video = try await item.loadTransferable(type: PickedVideoAttachment.self) else {
@@ -1443,7 +1951,7 @@ struct Composer: View, Equatable {
                     prepared.append(video.attachment)
                     do {
                         try Task.checkCancellation()
-                        try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared)
+                        try AttachmentProcessor.validateFrame(message: "", attachments: existing() + prepared)
                     } catch { prepared.removeLast().removeOwnedFile(); throw error }
                     continue
                 }
@@ -1458,17 +1966,42 @@ struct Composer: View, Equatable {
                     try AttachmentProcessor.prepareImage(data: data, fileName: name)
                 }.value
                 guard !Task.isCancelled else { return }
-                try AttachmentProcessor.validateFrame(message: "", attachments: self.model.pendingAttachments + prepared + [attachment])
+                try AttachmentProcessor.validateFrame(message: "", attachments: existing() + prepared + [attachment])
                 prepared.append(attachment)
             } catch {
                 guard !Task.isCancelled else { return }
                 failures.append(error.localizedDescription)
             }
         }
-        guard !Task.isCancelled, self.store.attachmentDraftTarget == target else { return }
-        if !prepared.isEmpty { self.store.addAttachments(prepared); committed = true }
-        if let first = failures.first {
-            self.store.showError(failures.count == 1 ? first : "\(failures.count) selected items could not be attached. \(first)")
+        guard !Task.isCancelled, self.imports.isPreparing(importID) else { return }
+        // Delivered to the draft they were picked for, even if the operator has moved on;
+        // that draft validates the batch and its answer settles this tile.
+        let outcome = self.store.deliverPreparedAttachments(prepared, target: target)
+        committed = true
+        var notAttached = failures.count
+        if outcome != .accepted { notAttached += prepared.count }
+        if let first = outcome.failureMessage ?? failures.first {
+            self.imports.retitle(importID, notAttached == 1 ? "1 item not attached" : "\(notAttached) items not attached")
+            self.imports.fail(importID, message: first)
+        } else {
+            self.imports.finish(importID)
+        }
+    }
+
+    /// Files prepare off the main actor behind a visible, cancellable tile and land in the
+    /// draft that was on screen when the picker opened.
+    private func importFiles(_ urls: [URL], target: ChatStore.AttachmentDraftTarget) {
+        self.imports.clearFailures(for: target)
+        let store = self.store
+        for url in urls {
+            self.imports.enqueue(
+                title: url.lastPathComponent,
+                symbol: "doc",
+                target: target,
+                work: { try await AttachmentProcessor.prepareForSending(url: url) },
+                deliver: { (attachment: PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome in
+                    store.deliverPreparedAttachments([attachment], target: target)
+                })
         }
     }
     #endif
@@ -1510,9 +2043,30 @@ struct Composer: View, Equatable {
 
     #if os(iOS)
     private func importFromUIPasteboard() {
-        for image in UIPasteboard.general.images ?? [] {
-            guard let data = image.pngData() ?? image.jpegData(compressionQuality: 0.9) else { continue }
-            self.store.addAttachment(imageData: data, fileName: "Pasted Image")
+        let target = self.store.attachmentDraftTarget
+        self.imports.clearFailures(for: target)
+        let images = UIPasteboard.general.hasImages ? (UIPasteboard.general.images ?? []) : []
+        guard !images.isEmpty else {
+            // Say so in place; an action that silently does nothing reads as broken.
+            self.imports.report(
+                "The clipboard has no image.", title: "Paste Image", symbol: "doc.on.clipboard", target: target)
+            return
+        }
+        let store = self.store
+        for image in images {
+            self.imports.enqueue(
+                title: "Pasted Image",
+                symbol: "doc.on.clipboard",
+                target: target,
+                work: {
+                    guard let data = image.pngData() ?? image.jpegData(compressionQuality: 0.9) else {
+                        throw AttachmentError.unreadable
+                    }
+                    return try AttachmentProcessor.prepareImage(data: data, fileName: "Pasted Image")
+                },
+                deliver: { (attachment: PreparedAttachment) -> ChatStore.AttachmentDeliveryOutcome in
+                    store.deliverPreparedAttachments([attachment], target: target)
+                })
         }
     }
     #endif
@@ -1767,47 +2321,71 @@ struct GlassCapsule: View {
     }
 }
 
-/// Session metadata updates independently of the field editor and streamed transcript.
-private struct ComposerModelIndicator: View {
-    let store: ChatStore
-    @State private var settingsSession: String?
+#if os(macOS)
+/// Keep the native document's bottom attached as its actual frame changes. SwiftUI's
+/// size-change anchor can run before staged rows finish layout on macOS 15; requesting
+/// another SwiftUI scroll from that same update still races the final document size.
+/// This observer changes only the clip origin, never the rows or the reader's intent.
+struct TranscriptTailAnchor: NSViewRepresentable {
+    let shouldFollow: () -> Bool
 
-    private var isConnected: Bool {
-        if case .connected = self.store.connectionState { return true }
-        return false
+    func makeNSView(context: Context) -> AnchorView { AnchorView(shouldFollow: self.shouldFollow) }
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.shouldFollow = self.shouldFollow
+        view.attach()
     }
+    static func dismantleNSView(_ view: AnchorView, coordinator: ()) { view.stop() }
 
-    var body: some View {
-        let session = self.store.sessions.first { $0.key == self.store.selectedSessionKey }
-        let status = ComposerModelStatus(
-            model: session?.model,
-            isConnected: self.isConnected)
-        Button {
-            self.settingsSession = self.store.selectedSessionKey
-        } label: {
-            HStack(spacing: 5) {
-                Text(status.label)
-                if let key = self.store.selectedSessionKey, self.store.pendingModelChanges[key] != nil {
-                    Text("· next turn").foregroundStyle(.orange)
-                }
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
+    final class AnchorView: NSView {
+        var shouldFollow: () -> Bool
+        private weak var observedDocument: NSView?
+
+        init(shouldFollow: @escaping () -> Bool) {
+            self.shouldFollow = shouldFollow
+            super.init(frame: .zero)
         }
-            .buttonStyle(.plain)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel(status.label)
-            .help("Model settings. " + status.help)
-            .sheet(isPresented: Binding(get: { self.settingsSession != nil }, set: { if !$0 { self.settingsSession = nil } })) {
-                if let key = self.settingsSession { SessionModelSettingsView(store: self.store, sessionKey: key) }
+        required init?(coder: NSCoder) { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if self.window == nil { self.stop() } else { self.attach() }
+        }
+        override func layout() {
+            super.layout()
+            self.attach()
+        }
+        func attach() {
+            guard let document = self.enclosingScrollView?.documentView else { return }
+            if self.observedDocument !== document {
+                self.stop()
+                self.observedDocument = document
+                document.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(self.documentFrameChanged),
+                    name: NSView.frameDidChangeNotification, object: document)
             }
+            self.reanchor()
+        }
+        @objc private func documentFrameChanged(_ notification: Notification) { self.reanchor() }
+        private func reanchor() {
+            guard self.shouldFollow(), let scroll = self.enclosingScrollView,
+                  let document = self.observedDocument, scroll.documentView === document else { return }
+            let clip = scroll.contentView
+            let bottom = document.isFlipped
+                ? max(document.bounds.minY, document.bounds.maxY - clip.bounds.height)
+                : document.bounds.minY
+            guard abs(clip.bounds.origin.y - bottom) > 0.5 else { return }
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: bottom))
+            scroll.reflectScrolledClipView(clip)
+        }
+        func stop() {
+            NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: self.observedDocument)
+            self.observedDocument = nil
+        }
+        deinit { NotificationCenter.default.removeObserver(self) }
     }
 }
 
-#if os(macOS)
 /// Observe only real scroll input delivered to this transcript's window and bounds.
 /// Never consume the event: native scrolling, momentum and accessibility remain AppKit's.
 private struct TranscriptWheelObserver: NSViewRepresentable {

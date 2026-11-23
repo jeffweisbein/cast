@@ -6,6 +6,10 @@ Cast is a source-first developer preview. Focused bug reports, documentation imp
 
 You need a Mac with the Xcode 26.3 or newer, XcodeGen, and an OpenClaw gateway for live integration testing.
 
+The checked-in project uses **XcodeGen 2.47.0**. Use that version when regenerating tracked
+files. Review generated project/scheme changes when upgrading the tool; CI keeps a strict
+generation-parity check.
+
 ```sh
 brew install xcodegen
 Scripts/generate-project.sh
