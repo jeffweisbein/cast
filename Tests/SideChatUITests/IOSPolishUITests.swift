@@ -208,7 +208,10 @@ final class IOSPolishUITests: XCTestCase {
             $0.frame.minX < fieldMidX && $0.frame.maxX > fieldMidX
         }
         XCTAssertEqual(compactStatus.count, 1)
-        try XCTUnwrap(compactStatus.first).tap()
+        let compactControl = try XCTUnwrap(compactStatus.first)
+        XCTAssertGreaterThanOrEqual(compactControl.frame.height, 43.99)
+        self.attach(app, "compact-connection-before-tap")
+        compactControl.tap()
         XCTAssertTrue(app.navigationBars["Connection"].waitForExistence(timeout: 5), "Explicit compact-status tap must still open details")
         app.buttons["Done"].firstMatch.tap()
         XCTAssertTrue(self.gone(app.navigationBars["Connection"]))

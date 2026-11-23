@@ -28,7 +28,10 @@ struct ConnectionStatusView: View {
                     if unconfirmed > 0 { Text("· \(unconfirmed) unconfirmed") }
                     Spacer()
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                }.font(.caption)
+                }
+                .font(.caption)
+                .frame(minHeight: compact ? 44 : nil)
+                .contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel("Connection status: " + ConnectionPresentation.title(store.connectionState) + (unconfirmed > 0 ? ", \(unconfirmed) unconfirmed messages" : ""))
             if !compact && (expanded || !connected || unconfirmed > 0) {
                 Text(ConnectionPresentation.detail(store.connectionState, unconfirmed: unconfirmed))
@@ -37,7 +40,7 @@ struct ConnectionStatusView: View {
                     Button("Reconnect") { store.restartWithStoredCredential() }.font(.caption)
                 }
             }
-        }.padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial)
+        }.padding(.horizontal, 12).padding(.vertical, compact ? 0 : 8).background(.regularMaterial)
         .sheet(isPresented: $showingDetails) {
             NavigationStack {
                 VStack { ConnectionStatusView(store: store); Spacer() }
