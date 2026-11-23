@@ -108,11 +108,11 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var softwareKeyboardVisible = false
     #endif
     private var usesShortLayout: Bool {
         #if os(iOS)
-        verticalSizeClass == .compact || (dynamicTypeSize.isAccessibilitySize && composerFocused)
+        verticalSizeClass == .compact || softwareKeyboardVisible
         #else
         false
         #endif
@@ -337,6 +337,7 @@ struct ChatView: View {
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
+        .accessibilityIdentifier("chat-transcript")
         .scrollPosition(self.$scrollPosition)
         .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.1) { ids in
             let visible = Set(ids)
@@ -599,7 +600,7 @@ struct ChatView: View {
             CastLifecycleDiagnostics.composerFocusChanged(focused: focused)
             // Same shape as the attachment case: the keyboard shrinks the scroll view's real
             // frame, so without this the newest row slides out of view and stays there.
-            guard focused, self.followState.followsLatest else { return }
+            guard self.followState.followsLatest else { return }
             self.scrollToBottom(animated: false)
         }
         .onChange(of: self.store.selectedSessionKey) {
@@ -643,6 +644,22 @@ struct ChatView: View {
             // Exactly one deferred mutation after activation; no scroll-position writes
             // occur while UIKit is backgrounded or transitioning through inactive.
             self.scrollToBottom(animated: false)
+        }
+    }
+
+    @ViewBuilder
+    private func attentionButtons(questions: Int, secure: Bool) -> some View {
+        if questions > 0 {
+            Button("\(questions) question\(questions == 1 ? "" : "s") waiting", systemImage: "questionmark.bubble.fill") {
+                showingQuestions = true
+            }
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("chat-pending-questions")
+        }
+        if secure {
+            Button("Secure entry requested", systemImage: "lock.fill") { showingSecretRequests = true }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("chat-pending-secure-entry")
         }
     }
 
@@ -741,6 +758,28 @@ struct ChatView: View {
             ConnectionStatusView(store: store)
             #endif
             if !self.usesShortLayout || self.showingFind { navigationControls }
+            #if os(iOS)
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
+                let secure = store.secretRequests.contains { $0.isPendingSecret && $0.belongs(to: store.selectedSessionKey) }
+                if !pending.isEmpty || secure {
+                    // Attention is never hidden by the typing layout. One compact row
+                    // replaces the tall banners; each destination keeps a labelled target.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            attentionButtons(questions: pending.count, secure: secure)
+                        }
+                        VStack(alignment: .leading, spacing: 0) {
+                            attentionButtons(questions: pending.count, secure: secure)
+                        }
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.regularMaterial)
+                }
+            }
+            #else
             if !self.usesShortLayout {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let pending = store.questionInbox.sorted.filter { $0.request.isPending(at: context.date) }
@@ -755,6 +794,7 @@ struct ChatView: View {
             }
 
             }
+            #endif
             if focusedSearchItemID != nil {
                 HStack {
                     Text("Viewing another part of the conversation").font(.caption)
@@ -783,6 +823,18 @@ struct ChatView: View {
             }
             .background(Theme.canvas)
         }
+        #if os(iOS)
+        .background {
+            DockedKeyboardReader { self.softwareKeyboardVisible = $0 }
+                .ignoresSafeArea(.keyboard)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onChange(of: self.usesShortLayout) { _, _ in
+            guard self.followState.followsLatest else { return }
+            self.scrollToBottom(animated: false)
+        }
+        #endif
         .navigationTitle(self.title)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -1395,12 +1447,26 @@ struct Composer: View, Equatable {
                     if !capturing {
                         self.addMenu
                     }
-                    Spacer(minLength: 4)
                     if !capturing {
-                        ComposerModelIndicator(store: self.store, style: .chip) { presented in
+                        ComposerModelIndicator(store: self.store, style: .toolbar) { presented in
                             self.modelSheetPresentationChanged(presented)
                         }
                     }
+                    Spacer(minLength: 0)
+                    Button { self.focused = false } label: {
+                        Image(systemName: "keyboard.chevron.compact.down")
+                            .font(.system(size: 19))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(!self.focused)
+                    .opacity(capturing ? 0 : 1)
+                    .allowsHitTesting(!capturing)
+                    .accessibilityHidden(capturing)
+                    .accessibilityLabel("Hide keyboard")
+                    .accessibilityIdentifier("composer-hide-keyboard")
                     if self.allowsSending {
                         // One structural slot in both states, so the in-flight hold gesture
                         // survives the idle → recording swap of the row above.
@@ -1416,7 +1482,7 @@ struct Composer: View, Equatable {
                         .accessibilityHidden(capturing)
                 }
                 .padding(.horizontal, 8)
-                .padding(.bottom, 6)
+                .padding(.bottom, 2)
             }
         }
         .background(
@@ -1469,7 +1535,6 @@ struct Composer: View, Equatable {
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 36, height: 36)
-                .background(Circle().fill(.quaternary.opacity(0.5)))
                 .frame(width: ComposerSendGate.minimumHitTarget, height: ComposerSendGate.minimumHitTarget)
                 .contentShape(Rectangle())
         }
@@ -1491,7 +1556,7 @@ struct Composer: View, Equatable {
         TextField("Message the fleet…", text: self.$draft, axis: .vertical)
             .accessibilityIdentifier("composer-message-field")
             .textFieldStyle(.plain)
-            .lineLimit(1 ... 12)
+            .lineLimit(1 ... 5)
             // Keep the empty field at its intrinsic one-line height inside the
             // detached VStack. It still grows through the line-limit range, and
             // Dynamic Type remains free to increase each line's intrinsic height.

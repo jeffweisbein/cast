@@ -155,6 +155,34 @@ final class IOSPolishUITests: XCTestCase {
         XCTAssertTrue(self.gone(keyboard), "The keyboard must dismiss through the production Hide keyboard action")
     }
 
+    func testCompactTypingAndDirectKeyboardDismissal() throws {
+        for arguments in [[String](), ["--large-text"]] {
+            let app = self.launch(arguments)
+            self.openChat(app, self.cast)
+            let field = self.composerField(app)
+            field.tap()
+            field.typeText("Keep this draft")
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            let hide = app.buttons["composer-hide-keyboard"]
+            XCTAssertTrue(hide.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(hide.isHittable)
+            XCTAssertGreaterThanOrEqual(hide.frame.width, 43.99)
+            XCTAssertGreaterThanOrEqual(hide.frame.height, 43.99)
+            XCTAssertTrue(self.gone(app.buttons["Jump to"]), "Routine navigation must collapse for the docked keyboard")
+            let transcript = app.scrollViews["chat-transcript"]
+            self.record(["transcript: \(transcript.frame)", "composer: \(field.frame)", "hide: \(hide.frame)"],
+                        arguments.isEmpty ? "bear-standard-geometry" : "bear-large-text-geometry")
+            self.attach(app, arguments.isEmpty ? "bear-standard-typing" : "bear-large-text-typing")
+            hide.tap()
+            XCTAssertTrue(self.gone(app.keyboards.firstMatch))
+            XCTAssertTrue(app.buttons["Jump to"].waitForExistence(timeout: 5), "Navigation must return after keyboard dismissal")
+            XCTAssertEqual(self.draftText(self.composerField(app)), "Keep this draft")
+            self.waitForSelection(app, self.cast, "Dismissal must preserve the selected chat")
+            self.attach(app, arguments.isEmpty ? "bear-standard-dismissed" : "bear-large-text-dismissed")
+            app.terminate()
+        }
+    }
+
     // MARK: - Tabs, pinned order, switching and drafts
 
     func testTabsPinnedSwitcherAndDraftRetention() throws {

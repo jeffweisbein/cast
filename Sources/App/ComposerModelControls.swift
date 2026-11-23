@@ -9,6 +9,8 @@ struct ComposerModelIndicator: View {
         case caption
         /// A compact control inside the composer's bottom row (iOS).
         case chip
+        /// Fixed-width entry keeps the typing strip readable at large text sizes.
+        case toolbar
     }
 
     let store: ChatStore
@@ -35,6 +37,17 @@ struct ComposerModelIndicator: View {
             switch self.style {
             case .caption: self.captionLabel(status, pending: pending)
             case .chip: self.chipLabel(status, pending: pending)
+            case .toolbar:
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .topTrailing) {
+                        if pending {
+                            Circle().fill(.orange).frame(width: 6, height: 6).padding(6)
+                        }
+                    }
             }
         }
         .buttonStyle(.plain)
