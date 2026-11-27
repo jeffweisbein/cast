@@ -473,6 +473,7 @@ public final class WorkspaceManager: ObservableObject {
         let existing = self.profiles.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })
         let id = existing?.id ?? self.uniqueID(from: name)
         let profile = WorkspaceProfile(id: id, name: name, gatewayURL: payload.url, accent: existing?.accent ?? "purple")
+        try self.prepareNotificationWorkspaceChange(existing: existing, replacement: profile)
         try GatewayCredentialStore.replaceWithBootstrapToken(payload.bootstrapToken, workspaceID: id)
         self.upsert(profile)
         if existing == profile { self.reconnect(workspaceID: id) }
@@ -492,6 +493,7 @@ public final class WorkspaceManager: ObservableObject {
             name: name,
             gatewayURL: url,
             accent: existing?.accent ?? "purple")
+        try self.prepareNotificationWorkspaceChange(existing: existing, replacement: profile)
         try GatewayCredentialStore.setSharedToken(sharedToken.trimmingCharacters(in: .whitespacesAndNewlines), workspaceID: id)
         self.upsert(profile)
         if existing == profile { self.reconnect(workspaceID: id) }
@@ -513,6 +515,15 @@ public final class WorkspaceManager: ObservableObject {
 
     public func reconnect(workspaceID: String) {
         self.store(for: workspaceID).restartWithStoredCredential()
+    }
+
+    private func prepareNotificationWorkspaceChange(existing: WorkspaceProfile?, replacement: WorkspaceProfile) throws {
+        #if os(iOS)
+        guard let existing, existing.gatewayURL != replacement.gatewayURL,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        try NativePushRelay.shared.markRevocationPending(workspaceID: existing.id)
+        Task { try? await NativePushRelay.shared.revoke(workspaceID: existing.id) }
+        #endif
     }
 
     private func upsert(_ profile: WorkspaceProfile) {

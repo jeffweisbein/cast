@@ -107,8 +107,11 @@ export function createRelay({ dbPath, sendAPNs, now = Date.now, attestationVerif
       const p = proof.payload;
       if (!exact(p, ['challengeId', 'relayHandle', 'action']) || p.action !== 'revoke' || !bounded(p.relayHandle, 64)) fail(400, 'InvalidRevocation');
       const reg = get('SELECT * FROM registrations WHERE handle=?', p.relayHandle);
-      if (!reg || reg.key_id !== proof.keyID) fail(403, 'RegistrationNotOwned');
-      consume(proof, reg.installation);
+      // Pruning may already have removed this expired handle. An authenticated
+      // existing key may acknowledge that absence, but never revoke a foreign
+      // live handle or enroll a new key through the revocation endpoint.
+      if (reg ? reg.key_id !== proof.keyID : !proof.existing) fail(403, 'RegistrationNotOwned');
+      consume(proof, reg?.installation ?? proof.existing.installation);
       rate(`revoke-key:${proof.keyID}`, 30);
       run('UPDATE registrations SET revoked=1 WHERE handle=?', p.relayHandle);
       return { revoked: true };

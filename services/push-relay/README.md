@@ -67,7 +67,7 @@ Register signed JSON:
 {"challengeId":"...","installationId":"UUID","bundleId":"com.besttechie.cast","environment":"production","apnsToken":"hex","gateway":{"deviceId":"SHA256-hex","publicKey":"Ed25519-base64url"}}
 ```
 
-Reply `{status:"registered",relayHandle,sendGrant,expiresAtMs,tokenSuffix}`. Renew before expiry or token/gateway changes. Revoke signed JSON `{challengeId,relayHandle,action:"revoke"}`; only owning attested key may revoke.
+Reply `{status:"registered",relayHandle,sendGrant,expiresAtMs,tokenSuffix}`. Renew before expiry or token/gateway changes. Revoke signed JSON `{challengeId,relayHandle,action:"revoke"}`; only the owning attested key may revoke an existing handle. For an already-pruned handle, an existing attested key may acknowledge its absence with a fresh challenge/assertion; this consumes the assertion counter and challenge without granting ownership or creating a registration.
 
 Send body is `{relayHandle,pushType:"alert",priority:10,payload,idempotencyKey,expiresAt}`. Payload:
 

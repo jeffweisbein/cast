@@ -34,6 +34,7 @@ public final class NativePushRegistration {
     public func registerIfAuthorized() async {
         #if os(iOS)
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        await NativePushRelay.shared.retryPendingRevocations()
         guard self.environment != nil else {
             self.failureMessage = "This build does not support remote notifications."
             return
@@ -76,6 +77,11 @@ public struct NativePushStatus: Decodable, Sendable {
     public let gatewayDeviceId: String
     public let workspaceId: String?
     public let supportedKinds: [String]?
+    public let supportedTransports: [String]?
+    public let relayOrigin: String?
+    public let gatewayPublicKey: String?
+    public let transport: String?
+    public let expiresAtMs: Double?
 
     /// Older gateways can deliver task alerts without supporting scheduled reminders.
     public var supportsReminders: Bool {

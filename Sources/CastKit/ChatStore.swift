@@ -5001,6 +5001,16 @@ public final class ChatStore {
 
     private func syncRemotePush() async {
         self.remotePushReady = false
+        // Relay revocation does not depend on the user's gateway being online.
+        var relayRevocationPending = false
+        if !self.remotePushEnabled {
+            do { try await NativePushRelay.shared.revoke(workspaceID: self.profile.id) }
+            catch {
+                relayRevocationPending = true
+                self.remotePushStatus = "Notifications are off here. Reconnect to finish disabling remote alerts."
+                // Still unregister from the gateway below when it is reachable.
+            }
+        }
         let takeover = self.remotePushTakeoverRequested
         self.remotePushTakeoverRequested = false
         guard let client = self.client, case .connected = self.connectionState else {
@@ -5023,10 +5033,13 @@ public final class ChatStore {
             }
             if !self.remotePushEnabled {
                 _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
-                self.remotePushStatus = "Remote notifications are off."
+                self.remotePushStatus = relayRevocationPending
+                    ? "Notifications are off here. Reconnect to finish disabling remote alerts."
+                    : "Remote notifications are off."
                 return
             }
             guard await NativeNotificationDelivery.shared.isAuthorized() else {
+                try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
                 _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
                 self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
                 return
@@ -5047,6 +5060,29 @@ public final class ChatStore {
                 "token": token, "topic": topic, "environment": environment,
                 "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
             ]
+            if environment == "production", initial.supportedTransports?.contains("relay") == true {
+                guard let publicKey = initial.gatewayPublicKey else { throw NativePushRelayError.invalidIdentity }
+                self.remotePushStatus = "Verifying this device for notifications…"
+                let relay = try await NativePushRelay.shared.registration(
+                    workspaceID: self.profile.id, token: token, gatewayID: initial.gatewayDeviceId,
+                    publicKey: publicKey, origin: initial.relayOrigin, force: takeover || !initial.registered || !initial.configured)
+                guard generation == self.clientGeneration, self.remotePushEnabled else {
+                    try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
+                    return
+                }
+                let currentExcluded = Set(self.mutedSessionKeys).union(self.sidebarPreferences.hiddenKeys).sorted()
+                guard currentExcluded.count <= 1000 else {
+                    try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
+                    throw NativePushRelayError.invalidResponse
+                }
+                parameters = [
+                    "transport": "relay", "relayHandle": relay.grant.relayHandle,
+                    "sendGrant": relay.grant.sendGrant, "expiresAtMs": relay.grant.expiresAtMs,
+                    "relayOrigin": NativePushRelayConfiguration.origin, "installationId": relay.installationID,
+                    "gatewayDeviceId": initial.gatewayDeviceId, "topic": topic, "environment": environment,
+                    "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": currentExcluded,
+                ]
+            }
             if takeover, let previous = initial.workspaceId, previous != self.profile.id {
                 parameters["replaceWorkspaceId"] = previous
             }

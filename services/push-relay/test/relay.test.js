@@ -236,3 +236,18 @@ test('public enrollment flood cannot exhaust signed-send or preissued valid-revo
   assert.equal((await f.send(reg)).ok, true);
   assert.deepEqual(await f.rawCall('revoke', revokeProof), { revoked: true });
 });
+
+
+test('expired handle revocation is idempotent only for an existing attested key, then enrollment recovers', async (t) => {
+  const f = fixture(); t.after(f.close);
+  const old = await f.register();
+  f.advance(91 * 86400000);
+  const revoke = await f.proof({ action: 'revoke', relayHandle: old.relayHandle });
+  assert.deepEqual(await f.rawCall('revoke', revoke), { revoked: true });
+  await rejects(f.rawCall('revoke', revoke), 'InvalidChallenge');
+  const fresh = await f.register();
+  assert.equal((await f.send(fresh)).ok, true);
+  await rejects(f.rawCall('revoke', await f.proof({ action: 'revoke', relayHandle: old.relayHandle }, 'unknown-key')), 'RegistrationNotOwned');
+  await f.register({}, 'other-known-key');
+  await rejects(f.rawCall('revoke', await f.proof({ action: 'revoke', relayHandle: fresh.relayHandle }, 'other-known-key')), 'RegistrationNotOwned');
+});
