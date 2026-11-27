@@ -4168,6 +4168,8 @@ public final class ChatStore {
             }
         case "cron":
             self.handleCronEvent(event)
+        case "notification.reminder":
+            self.recordReminderNotification(event)
         case "task":
             // Tasks surface through session rows, so there is no in-place list to merge
             // into; the debounced refresh turns an upsert burst into one sessions.list.
@@ -4775,10 +4777,32 @@ public final class ChatStore {
                 .contains(message["openclawDeliveryMirror"]?["kind"]?.stringValue ?? "")
             guard !(message["provider"]?.stringValue == "openclaw" && artifactModel), !mirror else { return }
         }
+        self.recordNativeAlert(sessionKey: sessionKey, runID: runID, kind: .taskCompleted)
+    }
+
+    private func recordReminderNotification(_ event: EventFrame) {
+        // Emitted by the gateway only after committing a scheduled result to this
+        // conversation. A cron status or a transcript replay is not a due reminder.
+        guard let payload = event.payload,
+              payload["replay"]?.boolValue != true,
+              payload["replayed"]?.boolValue != true,
+              let sessionKey = payload["sessionKey"]?.stringValue, !sessionKey.isEmpty,
+              sessionKey.utf8.count <= 2048,
+              sessionKey.rangeOfCharacter(from: .controlCharacters) == nil,
+              let runID = payload["runId"]?.stringValue, !runID.isEmpty,
+              runID.utf8.count <= 512,
+              runID.rangeOfCharacter(from: .controlCharacters) == nil else { return }
+        let key = sessionKey.lowercased()
+        guard !key.contains(":cron:"), !key.contains(":incognito-"),
+              !(key.split(separator: ":").last?.hasPrefix("dreaming-") ?? false) else { return }
+        self.recordNativeAlert(sessionKey: sessionKey, runID: runID, kind: .reminderDue)
+    }
+
+    private func recordNativeAlert(sessionKey: String, runID: String, kind: NativeNotificationKind) {
         // iOS always assigns delivery to APNs, including while registration/status
         // sync is pending. A transient failure cannot open a competing local sender.
         if self.usesRemoteCompletionDelivery { return }
-        let eventID = "completion:\(runID)"
+        let eventID = "\(kind.eventPrefix):\(runID)"
         let dedupeID = "\(self.profile.id):\(eventID)"
         let now = Date()
         let linkage = NotificationLinkage(
@@ -4813,7 +4837,7 @@ public final class ChatStore {
             _ = self.notificationLedger.markEligible(
                 dedupeID: dedupeID,
                 at: now,
-                detail: "task-completed")
+                detail: kind.rawValue)
         } else {
             let reason = !enabled ? "notifications-off" : (hidden ? "hidden" : (muted ? "muted" : (visible ? "visible-session" : "test-host")))
             _ = self.notificationLedger.markSuppressed(
@@ -4826,15 +4850,13 @@ public final class ChatStore {
 
         // Lock-screen copy is intentionally generic: neither session titles nor previews
         // should expose private work to someone holding a locked device.
-        let title = "Task complete"
-        let body = "Open Cast to view the result."
         Task {
             let outcome = await NativeNotificationDelivery.shared.deliver(
                 identifier: dedupeID,
                 workspaceID: self.profile.id,
                 sessionKey: sessionKey,
-                title: title,
-                body: body)
+                title: kind.title,
+                body: kind.body)
             self.completeNativeNotification(dedupeID: dedupeID, outcome: outcome)
         }
     }
@@ -4958,8 +4980,7 @@ public final class ChatStore {
     /// persisted per-run ledger used by local events. Replayed socket finals stay silent.
     @discardableResult
     public func observeRemoteCompletion(_ destination: NativeNotificationDestination, presenting: Bool) -> Bool {
-        guard self.acceptsRemoteNotification(destination), let runID = destination.runID else { return false }
-        let eventID = "completion:\(runID)"
+        guard self.acceptsRemoteNotification(destination), let eventID = destination.eventID else { return false }
         let dedupeID = "\(self.profile.id):\(eventID)"
         let now = Date()
         guard self.notificationLedger.observe(dedupeID: dedupeID,
@@ -4971,7 +4992,7 @@ public final class ChatStore {
         if suppressed {
             _ = self.notificationLedger.markSuppressed(dedupeID: dedupeID, at: now, reason: "foreground-policy")
         } else {
-            _ = self.notificationLedger.markEligible(dedupeID: dedupeID, at: now, detail: "remote-task-completed")
+            _ = self.notificationLedger.markEligible(dedupeID: dedupeID, at: now, detail: "remote-\(destination.kind.rawValue)")
             _ = self.notificationLedger.markDelivered(dedupeID: dedupeID, at: now, detail: "remote-notification")
         }
         self.publishOperationsState()
@@ -4980,6 +5001,16 @@ public final class ChatStore {
 
     private func syncRemotePush() async {
         self.remotePushReady = false
+        // Relay revocation does not depend on the user's gateway being online.
+        var relayRevocationPending = false
+        if !self.remotePushEnabled {
+            do { try await NativePushRelay.shared.revoke(workspaceID: self.profile.id) }
+            catch {
+                relayRevocationPending = true
+                self.remotePushStatus = "Notifications are off here. Reconnect to finish disabling remote alerts."
+                // Still unregister from the gateway below when it is reachable.
+            }
+        }
         let takeover = self.remotePushTakeoverRequested
         self.remotePushTakeoverRequested = false
         guard let client = self.client, case .connected = self.connectionState else {
@@ -5002,10 +5033,13 @@ public final class ChatStore {
             }
             if !self.remotePushEnabled {
                 _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
-                self.remotePushStatus = "Remote notifications are off."
+                self.remotePushStatus = relayRevocationPending
+                    ? "Notifications are off here. Reconnect to finish disabling remote alerts."
+                    : "Remote notifications are off."
                 return
             }
             guard await NativeNotificationDelivery.shared.isAuthorized() else {
+                try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
                 _ = try await client.request(method: "push.native.unregister", params: ["workspaceId": self.profile.id])
                 self.remotePushStatus = "Allow Cast notifications in Settings to receive task alerts."
                 return
@@ -5026,6 +5060,29 @@ public final class ChatStore {
                 "token": token, "topic": topic, "environment": environment,
                 "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": excluded,
             ]
+            if environment == "production", initial.supportedTransports?.contains("relay") == true {
+                guard let publicKey = initial.gatewayPublicKey else { throw NativePushRelayError.invalidIdentity }
+                self.remotePushStatus = "Verifying this device for notifications…"
+                let relay = try await NativePushRelay.shared.registration(
+                    workspaceID: self.profile.id, token: token, gatewayID: initial.gatewayDeviceId,
+                    publicKey: publicKey, origin: initial.relayOrigin, force: takeover || !initial.registered || !initial.configured)
+                guard generation == self.clientGeneration, self.remotePushEnabled else {
+                    try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
+                    return
+                }
+                let currentExcluded = Set(self.mutedSessionKeys).union(self.sidebarPreferences.hiddenKeys).sorted()
+                guard currentExcluded.count <= 1000 else {
+                    try await NativePushRelay.shared.revoke(workspaceID: self.profile.id)
+                    throw NativePushRelayError.invalidResponse
+                }
+                parameters = [
+                    "transport": "relay", "relayHandle": relay.grant.relayHandle,
+                    "sendGrant": relay.grant.sendGrant, "expiresAtMs": relay.grant.expiresAtMs,
+                    "relayOrigin": NativePushRelayConfiguration.origin, "installationId": relay.installationID,
+                    "gatewayDeviceId": initial.gatewayDeviceId, "topic": topic, "environment": environment,
+                    "workspaceId": self.profile.id, "enabled": true, "excludedSessionKeys": currentExcluded,
+                ]
+            }
             if takeover, let previous = initial.workspaceId, previous != self.profile.id {
                 parameters["replaceWorkspaceId"] = previous
             }
@@ -5049,11 +5106,7 @@ public final class ChatStore {
             ], forKey: self.remotePushBindingKey)
             self.remotePushManagedElsewhere = status.isManagedElsewhere(workspaceID: self.profile.id)
             self.remotePushReady = status.registered && status.workspaceId == self.profile.id && status.enabled && status.configured
-            self.remotePushStatus = self.remotePushManagedElsewhere
-                ? "Task alerts are managed by another workspace on this device."
-                : self.remotePushReady
-                ? "Task alerts are ready, even when Cast is closed."
-                : "This workspace still needs notification delivery configured."
+            self.remotePushStatus = status.readinessMessage(workspaceID: self.profile.id)
         } catch {
             self.remotePushStatus = "Notification settings could not sync. Reconnect to try again."
         }

@@ -20,20 +20,20 @@ struct OperationsNotificationCenterView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Task completion alerts") {
+                Section("Reminders and task alerts") {
                     #if os(iOS)
-                    Toggle("Notify me when tasks finish", isOn: Binding(
+                    Toggle("Notify me about reminders and finished tasks", isOn: Binding(
                         get: { self.store.remotePushEnabled },
                         set: { enabled in Task { await self.store.setRemotePushEnabled(enabled) } }))
                     if self.store.remotePushManagedElsewhere {
-                        Button("Use this workspace for task alerts") {
+                        Button("Use this workspace for notifications") {
                             Task { await self.store.setRemotePushEnabled(true) }
                         }
                     }
                     Text(self.store.remotePushStatus)
                         .font(.caption).foregroundStyle(.secondary)
                     #else
-                    Text("Get an alert when a task finishes while you are away from its chat. Keep Cast running and connected. Muted chats do not send alerts.")
+                    Text("Get an alert when a reminder arrives or a task finishes while you are away from its chat. Keep Cast running and connected. Reminder alerts require a compatible workspace. Muted chats do not send alerts.")
                     #endif
                 }
                 if let authorizationMessage {
@@ -47,7 +47,7 @@ struct OperationsNotificationCenterView: View {
                     ContentUnavailableView(
                         self.query.isEmpty ? "No notifications yet" : "No matching notifications",
                         systemImage: "bell.slash",
-                        description: Text("Task completions and delivery outcomes appear here."))
+                        description: Text("Reminders, task completions and delivery outcomes appear here."))
                 } else {
                     ForEach(self.records) { record in
                         Button {

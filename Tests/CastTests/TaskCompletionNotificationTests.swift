@@ -175,4 +175,119 @@ final class TaskCompletionNotificationTests: XCTestCase {
         XCTAssertNil(NativePushEnvironment.resolve("Release"))
         XCTAssertNil(NativePushEnvironment.resolve(nil))
     }
+
+    @MainActor
+    func testReminderRoutesToBoundWorkspaceAndDoesNotCollideWithTaskCompletion() throws {
+        let (store, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bindingKey = "cast.push.binding.\(store.profile.id)"
+        defer { UserDefaults.standard.removeObject(forKey: bindingKey) }
+        let payload: [String: Any] = ["kind": "task.completed", "notificationKind": "reminder.due", "workspaceId": store.profile.id,
+            "sessionKey": "agent:main:task", "runId": "reminder:r", "gatewayDeviceId": "g"]
+        let reminder = try XCTUnwrap(NativeNotificationDestination(userInfo: ["openclaw": payload]))
+        XCTAssertFalse(store.acceptsRemoteNotification(reminder))
+        UserDefaults.standard.set(["url": store.profile.gatewayURL.absoluteString, "gatewayDeviceID": "g"], forKey: bindingKey)
+        XCTAssertEqual(reminder.kind, .reminderDue)
+        XCTAssertEqual(reminder.eventID, "completion:reminder:r")
+        var legacyPayload = payload
+        legacyPayload.removeValue(forKey: "notificationKind")
+        let legacy = try XCTUnwrap(NativeNotificationDestination(userInfo: ["openclaw": legacyPayload]))
+        XCTAssertEqual(legacy.kind, .taskCompleted)
+        XCTAssertTrue(store.observeRemoteCompletion(legacy, presenting: false))
+        XCTAssertFalse(store.observeRemoteCompletion(reminder, presenting: false), "An upgrade must not duplicate retained notifications")
+        let completion = try XCTUnwrap(NativeNotificationDestination(userInfo: ["openclaw":
+            legacyPayload.merging(["runId": "r"]) { _, new in new }]))
+        XCTAssertTrue(store.observeRemoteCompletion(completion, presenting: false))
+        XCTAssertEqual(Set(store.notificationRecords.map(\.linkage.sourceEventID)), ["completion:reminder:r", "completion:r"])
+    }
+
+    func testReminderMarkerMustMatchCompatibleEnvelopeAndNamespacedRun() {
+        let base: [String: Any] = ["kind": "task.completed", "notificationKind": "reminder.due",
+            "workspaceId": "w", "sessionKey": "s", "runId": "reminder:r", "gatewayDeviceId": "g"]
+        for overrides: [String: Any] in [["notificationKind": "unknown"], ["notificationKind": 1],
+            ["runId": "r"], ["runId": "reminder:"], ["kind": "reminder.due"]] {
+            XCTAssertNil(NativeNotificationDestination(userInfo: ["openclaw":
+                base.merging(overrides) { _, new in new }]))
+        }
+    }
+
+    func testMalformedReminderCannotFallBackToLocalRouting() {
+        let base: [String: Any] = ["kind": "reminder.due", "workspaceId": "w",
+            "sessionKey": "agent:main:task", "runId": "r", "gatewayDeviceId": "g"]
+        for field in ["runId", "gatewayDeviceId", "workspaceId", "sessionKey"] {
+            var payload = base
+            payload[field] = ""
+            XCTAssertNil(NativeNotificationDestination(userInfo: ["openclaw": payload,
+                "workspaceID": "local", "sessionKey": "local-session"]), field)
+            payload.removeValue(forKey: field)
+            XCTAssertNil(NativeNotificationDestination(userInfo: ["openclaw": payload,
+                "workspaceID": "local", "sessionKey": "local-session"]), "missing \(field)")
+        }
+    }
+
+    func testReminderReadinessRequiresExplicitGatewaySupportAndConfiguredDelivery() throws {
+        let base: [String: Any] = ["registered": true, "enabled": true, "configured": true,
+            "gatewayDeviceId": "g", "workspaceId": "w"]
+        func status(_ overrides: [String: Any] = [:]) throws -> NativePushStatus {
+            try JSONDecoder().decode(NativePushStatus.self, from: JSONSerialization.data(
+                withJSONObject: base.merging(overrides) { _, new in new }))
+        }
+        let legacy = try status()
+        XCTAssertFalse(legacy.supportsReminders)
+        XCTAssertEqual(legacy.readinessMessage(workspaceID: "w"),
+            "Task alerts are ready. Update this workspace to enable reminder alerts.")
+        let capable = try status(["supportedKinds": ["task.completed", "reminder.due"]])
+        XCTAssertTrue(capable.supportsReminders)
+        XCTAssertEqual(capable.readinessMessage(workspaceID: "w"),
+            "Reminders and task alerts are ready, even when Cast is closed.")
+        XCTAssertEqual(capable.readinessMessage(workspaceID: "alias"),
+            "Notifications are managed by another workspace on this device.")
+        for field in ["registered", "enabled", "configured"] {
+            XCTAssertEqual(try status([field: false, "supportedKinds": ["reminder.due"]])
+                .readinessMessage(workspaceID: "w"),
+                "This workspace still needs notification delivery configured.")
+        }
+    }
+
+    @MainActor
+    func testOnlyCommittedReminderEventsNotifyLocallyAndDoNotDuplicate() throws {
+        let (store, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        store.isNotificationContextVisible = false
+        func event(_ overrides: [String: Any] = [:], name: String = "notification.reminder") throws -> EventFrame {
+            try JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: [
+                "event": name, "payload": ["sessionKey": "agent:main:task", "runId": "scheduled-1"]
+                    .merging(overrides) { _, new in new },
+            ]))
+        }
+        store.handleEvent(try event(["action": "finished", "status": "ok"], name: "cron"))
+        for malformed: [String: Any] in [["runId": ""], ["sessionKey": ""], ["replay": true],
+            ["sessionKey": "agent:main:cron:daily"], ["sessionKey": "agent:main:incognito-private"],
+            ["runId": "bad\n"], ["sessionKey": "bad\n"]] {
+            store.handleEvent(try event(malformed))
+        }
+        XCTAssertTrue(store.notificationRecords.isEmpty)
+        store.handleEvent(try event())
+        store.handleEvent(try event())
+        #if os(iOS)
+        XCTAssertTrue(store.notificationRecords.isEmpty, "APNs owns iOS reminder delivery")
+        #else
+        XCTAssertEqual(store.notificationRecords.count, 1)
+        XCTAssertEqual(store.notificationRecords.first?.linkage.sourceEventID, "reminder:scheduled-1")
+        XCTAssertEqual(store.notificationRecords.first?.transitions.last?.detail, "test-host")
+        #endif
+    }
+
+    @MainActor
+    func testReminderSocketDoesNotRaceAPNsDuringRegistration() throws {
+        let (store, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        store.usesRemoteCompletionDelivery = true
+        store.isNotificationContextVisible = false
+        let event = try JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: [
+            "event": "notification.reminder", "payload": ["sessionKey": "agent:main:task", "runId": "r"],
+        ]))
+        store.handleEvent(event)
+        XCTAssertTrue(store.notificationRecords.isEmpty)
+    }
 }

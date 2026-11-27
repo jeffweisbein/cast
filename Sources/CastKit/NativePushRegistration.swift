@@ -34,6 +34,7 @@ public final class NativePushRegistration {
     public func registerIfAuthorized() async {
         #if os(iOS)
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        await NativePushRelay.shared.retryPendingRevocations()
         guard self.environment != nil else {
             self.failureMessage = "This build does not support remote notifications."
             return
@@ -75,6 +76,29 @@ public struct NativePushStatus: Decodable, Sendable {
     public let configured: Bool
     public let gatewayDeviceId: String
     public let workspaceId: String?
+    public let supportedKinds: [String]?
+    public let supportedTransports: [String]?
+    public let relayOrigin: String?
+    public let gatewayPublicKey: String?
+    public let transport: String?
+    public let expiresAtMs: Double?
+
+    /// Older gateways can deliver task alerts without supporting scheduled reminders.
+    public var supportsReminders: Bool {
+        self.supportedKinds?.contains(NativeNotificationKind.reminderDue.rawValue) == true
+    }
+
+    public func readinessMessage(workspaceID: String) -> String {
+        if self.isManagedElsewhere(workspaceID: workspaceID) {
+            return "Notifications are managed by another workspace on this device."
+        }
+        guard self.registered, self.workspaceId == workspaceID, self.enabled, self.configured else {
+            return "This workspace still needs notification delivery configured."
+        }
+        return self.supportsReminders
+            ? "Reminders and task alerts are ready, even when Cast is closed."
+            : "Task alerts are ready. Update this workspace to enable reminder alerts."
+    }
 
     public func isManagedElsewhere(workspaceID: String) -> Bool {
         self.registered && self.workspaceId != nil && self.workspaceId != workspaceID

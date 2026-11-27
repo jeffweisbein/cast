@@ -85,8 +85,8 @@ public actor NativeNotificationDelivery {
         var deliveredIDs = identifiers
         for notification in await self.center.deliveredNotifications() {
             guard let destination = NativeNotificationDestination(userInfo: notification.request.content.userInfo),
-                  let runID = destination.runID,
-                  matching.contains("\(destination.workspaceID):completion:\(runID)") else { continue }
+                  let eventID = destination.eventID,
+                  matching.contains("\(destination.workspaceID):\(eventID)") else { continue }
             deliveredIDs.append(notification.request.identifier)
         }
         self.center.removePendingNotificationRequests(withIdentifiers: identifiers)
@@ -98,24 +98,55 @@ public actor NativeNotificationDelivery {
     }
 }
 
+public enum NativeNotificationKind: String, Sendable {
+    case taskCompleted = "task.completed"
+    case reminderDue = "reminder.due"
+
+    var eventPrefix: String { self == .reminderDue ? "reminder" : "completion" }
+    var title: String { self == .reminderDue ? "Reminder" : "Task complete" }
+    var body: String { self == .reminderDue ? "Your reminder is ready. Open Cast to view it." : "Open Cast to view the result." }
+}
+
 /// Typed notification routing; payloads never supply a gateway address or credentials.
 public struct NativeNotificationDestination: Equatable, Sendable {
     public let workspaceID: String
     public let sessionKey: String
     public let gatewayDeviceID: String?
     public let runID: String?
+    public let kind: NativeNotificationKind
+    /// Stable transport identity, including across upgrades from task-only clients.
+    public let eventID: String?
 
     public init?(userInfo: [AnyHashable: Any]) {
         let remote = userInfo["openclaw"] as? [String: Any]
         if userInfo["openclaw"] != nil && remote == nil { return nil }
         if let remote {
-            guard remote["kind"] as? String == "task.completed",
+            guard let rawKind = remote["kind"] as? String,
+                  let kind = NativeNotificationKind(rawValue: rawKind),
                   let gateway = remote["gatewayDeviceId"] as? String, !gateway.isEmpty,
                   let run = remote["runId"] as? String, !run.isEmpty,
-                  gateway.utf8.count <= 512, run.utf8.count <= 512 else { return nil }
+                  gateway.utf8.count <= 512, run.utf8.count <= 512,
+                  gateway.rangeOfCharacter(from: .controlCharacters) == nil,
+                  run.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+            if let marker = remote["notificationKind"] {
+                guard let marker = marker as? String, marker == NativeNotificationKind.reminderDue.rawValue,
+                      kind == .taskCompleted, run.hasPrefix("reminder:"),
+                      run.count > "reminder:".count else { return nil }
+                self.kind = .reminderDue
+            } else {
+                self.kind = kind
+            }
+            self.eventID = "\(kind.eventPrefix):\(run)"
+        } else {
+            self.eventID = nil
+            self.kind = .taskCompleted
         }
-        guard let workspaceID = (remote?["workspaceId"] ?? userInfo["workspaceID"]) as? String,
-              let sessionKey = (remote?["sessionKey"] ?? userInfo["sessionKey"]) as? String,
+        // Remote envelopes must stand alone; malformed remote routing must never
+        // fall back to unrelated local-notification fields on the same payload.
+        let workspaceValue = remote != nil ? remote?["workspaceId"] : userInfo["workspaceID"]
+        let sessionValue = remote != nil ? remote?["sessionKey"] : userInfo["sessionKey"]
+        guard let workspaceID = workspaceValue as? String,
+              let sessionKey = sessionValue as? String,
               !workspaceID.isEmpty, workspaceID.utf8.count <= 512,
               !sessionKey.isEmpty, sessionKey.utf8.count <= 2048,
               workspaceID.rangeOfCharacter(from: .controlCharacters) == nil,
