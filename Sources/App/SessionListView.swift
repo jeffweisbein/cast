@@ -346,19 +346,18 @@ struct NewPersonalChatView: View {
     @State private var error: String?
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                TextField("Chat name", text: $name).textFieldStyle(.roundedBorder).accessibilityIdentifier("new-chat-name")
-                HStack {
-                    ForEach(["Cast", "Cackles", "RunPR", "General"], id: \.self) { title in
-                        Button(title) { name = title }.buttonStyle(.borderless)
-                    }
-                }.font(.callout)
-                Text("First message").font(.headline)
-                TextEditor(text: $message).frame(minHeight: 140).accessibilityIdentifier("new-chat-message")
-                if let error { Text(error).foregroundStyle(.red).font(.callout) }
-                if !store.canCreatePersonalChat { Text(store.chatSidebarSyncNotice ?? "Connect to your gateway to send and create this chat.").font(.caption).foregroundStyle(.secondary) }
-                Text("A chat is created only when you send. Cancelling creates nothing.").font(.caption).foregroundStyle(.secondary)
-            }.padding(20).navigationTitle("New Chat")
+            Group {
+                #if os(iOS)
+                ScrollView {
+                    formContent
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .navigationBarTitleDisplayMode(.inline)
+                #else
+                formContent
+                #endif
+            }
+            .navigationTitle("New Chat")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(sending) }
                 ToolbarItem(placement: .confirmationAction) {
@@ -378,6 +377,49 @@ struct NewPersonalChatView: View {
         .frame(width: 540, height: 420)
         #endif
     }
+
+    private var formContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            TextField("Chat name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("new-chat-name")
+            #if os(iOS)
+            ViewThatFits(in: .horizontal) {
+                HStack { suggestedNames }
+                LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading) {
+                    suggestedNames
+                }
+            }.font(.callout)
+            #else
+            HStack { suggestedNames }.font(.callout)
+            #endif
+            Text("First message").font(.headline)
+            #if os(iOS)
+            TextEditor(text: $message)
+                .frame(height: 180)
+                .accessibilityIdentifier("new-chat-message")
+            #else
+            TextEditor(text: $message)
+                .frame(minHeight: 140)
+                .accessibilityIdentifier("new-chat-message")
+            #endif
+            if let error { Text(error).foregroundStyle(.red).font(.callout) }
+            if !store.canCreatePersonalChat {
+                Text(store.chatSidebarSyncNotice ?? "Connect to your gateway to send and create this chat.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("A chat is created only when you send. Cancelling creates nothing.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(20)
+    }
+
+    private var suggestedNames: some View {
+        ForEach(["Cast", "Cackles", "RunPR", "General"], id: \.self) { title in
+            Button(title) { name = title }.buttonStyle(.borderless)
+        }
+    }
+
 }
 
 struct SessionRowView: View {
